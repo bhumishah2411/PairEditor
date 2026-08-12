@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Custom scrollbar ──────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2e3644; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #6FE3A6; }
+
+/* ── Monaco editor overrides ──────────────────────────────────────────────── */
+.monaco-editor .margin { background: transparent !important; }
+.monaco-editor, .monaco-editor-background, .monaco-editor .inputarea.ime-input {
+  background-color: transparent !important;
+}
+
+/* ── Panel surface (replaces old glassmorphism) ──────────────────────────── */
+.panel-glass {
+  background: rgba(22, 27, 34, 0.82);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* ── Terminal cursor block — the recurring wordmark glyph ────────────────── */
+.cursor-block {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  background: #6FE3A6;
+  vertical-align: -0.15em;
+  animation: cursorBlink 1.05s steps(1) infinite;
+}
+@keyframes cursorBlink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+/* ── Author gutter — the app's signature visual: a stripe of who's present ── */
+.author-gutter {
+  width: 3px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+.author-gutter span { flex: 1; }
+
+/* ── Quiet accent button (replaces old neon btn-glow) ─────────────────────── */
+.btn-signal {
+  position: relative;
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+.btn-signal:hover { filter: brightness(1.08); }
+.btn-signal:active { transform: translateY(1px); }
+
+/* ── Typing dots ──────────────────────────────────────────────────────────── */
+.typing-dot {
+  display: inline-block;
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  margin: 0 1px;
+  animation: pulseDot 1.4s infinite ease-in-out;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes pulseDot { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+
+/* ── Light mode overrides ─────────────────────────────────────────────────── */
+.light body { background: #F6F7F5; color: #10141A; }
+.light .panel-glass {
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+/* ── Cursor label (remote collaborator caret tag) ─────────────────────────── */
+.cursor-label {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 1px 6px;
+  border-radius: 2px;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: fadeIn 0.15s ease-out;
+  font-weight: 500;
+}
+@keyframes fadeIn { 0% { opacity: 0; } 100% { opacity: 1; } }
