@@ -77,6 +77,28 @@ function fileListFor(room) {
   }));
 }
 
+function guessLanguageFromPath(path) {
+  const ext = String(path || "").split(".").pop()?.toLowerCase();
+  const map = {
+    js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
+    ts: "typescript", tsx: "typescript",
+    py: "python",
+    java: "java",
+    cpp: "cpp", cc: "cpp", cxx: "cpp", hpp: "cpp",
+    c: "c", h: "c",
+    go: "go",
+    rs: "rust",
+    html: "html", htm: "html",
+    css: "css",
+    json: "json",
+    md: "markdown", markdown: "markdown",
+    sql: "sql",
+    sh: "bash", bash: "bash",
+    php: "php",
+  };
+  return map[ext] || "plaintext";
+}
+
 function pickColor(usedColors) {
   for (const c of USER_COLORS) {
     if (!usedColors.includes(c)) return c;
@@ -238,6 +260,131 @@ io.on("connection", (socket) => {
 
     // Relay to all OTHER clients so they update their decorations
     socket.to(roomId).emit("line-author-update", { lines });
+  });
+
+  // ── create-file ─────────────────────────────────────────────────────────────
+  // Payload: { roomId, path, code, language }
+  socket.on("create-file", ({ roomId, path, code, language }) => {
+    const room = rooms.get(roomId);
+    if (!room || !path) return;
+
+    const safePath = String(path).replace(/^\/+/, "");
+    const existing = room.files.get(safePath);
+    if (existing) {
+      room.activeFile = safePath;
+      room.code = existing.code;
+      room.language = existing.language;
+      io.to(roomId).emit("files-update", { files: fileListFor(room), activeFile: room.activeFile });
+      io.to(roomId).emit("active-file-changed", {
+        path: room.activeFile,
+        code: room.code,
+        language: room.language,
+        lineAuthors: Object.fromEntries(room.lineAuthors),
+      });
+      return;
+    }
+
+    const fileLanguage = language || guessLanguageFromPath(safePath);
+    room.files.set(safePath, { code: code || "", language: fileLanguage });
+    room.activeFile = safePath;
+    room.code = room.files.get(safePath).code;
+    room.language = room.files.get(safePath).language;
+    room.lineAuthors = new Map();
+
+    io.to(roomId).emit("files-update", { files: fileListFor(room), activeFile: room.activeFile });
+    io.to(roomId).emit("active-file-changed", {
+      path: room.activeFile,
+      code: room.code,
+      language: room.language,
+      lineAuthors: {},
+    });
+  });
+
+  // ── rename-file ───────────────────────────────────────────────────────────
+  // Payload: { roomId, oldPath, newPath }
+  socket.on("rename-file", ({ roomId, oldPath, newPath }) => {
+    const room = rooms.get(roomId);
+    if (!room || !oldPath || !newPath) return;
+
+    const oldNormalized = String(oldPath).replace(/^\/+/, "");
+    const newNormalized = String(newPath).replace(/^\/+/, "");
+
+    if (oldNormalized === newNormalized) return;
+    if (room.files.has(newNormalized)) {
+      socket.emit("rename-file-error", { message: `A file named "${newNormalized}" already exists in this room.` });
+      return;
+    }
+
+    const fileEntry = room.files.get(oldNormalized);
+    if (!fileEntry) return;
+
+    const wasActive = room.activeFile === oldNormalized;
+    room.files.delete(oldNormalized);
+    room.files.set(newNormalized, { ...fileEntry });
+
+    const existingBlame = room.lineAuthorsByFile.get(oldNormalized);
+    if (existingBlame) {
+      room.lineAuthorsByFile.set(newNormalized, new Map(existingBlame));
+      room.lineAuthorsByFile.delete(oldNormalized);
+    }
+
+    if (wasActive) {
+      room.activeFile = newNormalized;
+      room.code = room.files.get(newNormalized).code;
+      room.language = room.files.get(newNormalized).language;
+      room.lineAuthors = room.lineAuthorsByFile.get(newNormalized) || new Map();
+      io.to(roomId).emit("active-file-changed", {
+        path: room.activeFile,
+        code: room.code,
+        language: room.language,
+        lineAuthors: Object.fromEntries(room.lineAuthors),
+      });
+    }
+
+    io.to(roomId).emit("files-update", { files: fileListFor(room), activeFile: room.activeFile });
+  });
+
+  // ── delete-file ───────────────────────────────────────────────────────────
+  // Payload: { roomId, path }
+  socket.on("delete-file", ({ roomId, path }) => {
+    const room = rooms.get(roomId);
+    if (!room || !path) return;
+
+    const target = String(path).replace(/^\/+/, "");
+    if (!room.files.has(target)) return;
+
+    const wasActive = room.activeFile === target;
+    room.files.delete(target);
+    room.lineAuthorsByFile.delete(target);
+
+    if (wasActive) {
+      if (room.files.size > 0) {
+        const nextPath = [...room.files.keys()][0];
+        room.activeFile = nextPath;
+        room.code = room.files.get(nextPath).code;
+        room.language = room.files.get(nextPath).language;
+        room.lineAuthors = room.lineAuthorsByFile.get(nextPath) || new Map();
+        io.to(roomId).emit("active-file-changed", {
+          path: room.activeFile,
+          code: room.code,
+          language: room.language,
+          lineAuthors: Object.fromEntries(room.lineAuthors),
+        });
+      } else {
+        room.activeFile = null;
+        room.code = "// Start coding here...\n";
+        room.language = "javascript";
+        room.lineAuthors = new Map();
+        io.to(roomId).emit("active-file-changed", {
+          path: null,
+          code: room.code,
+          language: room.language,
+          lineAuthors: {},
+        });
+      }
+    }
+
+    io.to(roomId).emit("files-update", { files: fileListFor(room), activeFile: room.activeFile });
   });
 
   // ── upload-folder ───────────────────────────────────────────────────────────

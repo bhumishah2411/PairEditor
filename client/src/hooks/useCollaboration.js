@@ -131,6 +131,10 @@ export function useCollaboration({ socket, roomId, userName }) {
       setIsUploading(false);
     });
 
+    socket.on("rename-file-error", ({ message }) => {
+      window.alert(message || "Rename failed.");
+    });
+
     // ── The whole room's shared buffer switched to a different file ────────
     socket.on("active-file-changed", ({ path, code: c, language: l, lineAuthors: la }) => {
       isRemoteChange.current = true;
@@ -153,6 +157,7 @@ export function useCollaboration({ socket, roomId, userName }) {
       socket.off("chat-message");
       socket.off("line-author-update");
       socket.off("files-update");
+      socket.off("rename-file-error");
       socket.off("active-file-changed");
     };
   }, [socket, roomId, userName]);
@@ -228,6 +233,59 @@ export function useCollaboration({ socket, roomId, userName }) {
     [socket, roomId]
   );
 
+  // ── Create a new file in the shared room ─────────────────────────────────
+  const createFile = useCallback(
+    (fileName) => {
+      if (!socket || !roomId) return;
+      const name = String(fileName || "").trim() || "untitled.js";
+      const normalized = name.startsWith("/") ? name.slice(1) : name;
+      const safePath = normalized.includes(".") ? normalized : `${normalized}.js`;
+
+      socket.emit("create-file", {
+        roomId,
+        path: safePath,
+        language: (() => {
+          const ext = safePath.split(".").pop()?.toLowerCase();
+          if (ext === "js" || ext === "jsx" || ext === "mjs" || ext === "cjs") return "javascript";
+          if (ext === "ts" || ext === "tsx") return "typescript";
+          if (ext === "py") return "python";
+          if (ext === "html") return "html";
+          if (ext === "css") return "css";
+          if (ext === "json") return "json";
+          if (ext === "md") return "markdown";
+          return "plaintext";
+        })(),
+        code: "",
+      });
+    },
+    [socket, roomId]
+  );
+
+  const renameFile = useCallback(
+    (oldPath, newName) => {
+      if (!socket || !roomId) return;
+      const trimmed = String(newName || "").trim();
+      if (!trimmed) return;
+      const normalizedOld = String(oldPath || "").replace(/^\/+/, "");
+      const baseDir = normalizedOld.includes("/")
+        ? normalizedOld.slice(0, normalizedOld.lastIndexOf("/") + 1)
+        : "";
+      const newPath = `${baseDir}${String(trimmed).replace(/^\/+/, "")}`;
+      if (!newPath || newPath === normalizedOld) return;
+
+      socket.emit("rename-file", { roomId, oldPath: normalizedOld, newPath });
+    },
+    [socket, roomId]
+  );
+
+  const deleteFile = useCallback(
+    (path) => {
+      if (!socket || !roomId) return;
+      socket.emit("delete-file", { roomId, path: String(path || "").replace(/^\/+/, "") });
+    },
+    [socket, roomId]
+  );
+
   // ── Upload a folder: read every included file, then hand the batch to the server ──
   const uploadFolder = useCallback(
     async (fileList) => {
@@ -290,6 +348,9 @@ export function useCollaboration({ socket, roomId, userName }) {
     emitLineAuthors,
     sendChatMessage,
     uploadFolder,
+    createFile,
+    renameFile,
+    deleteFile,
     switchFile,
   };
 }

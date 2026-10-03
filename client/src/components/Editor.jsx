@@ -81,16 +81,17 @@ export default function Editor({
       if (line < 1 || line > totalLines) return;
 
       const label   = userId === currentUserId ? "you" : name;
-      const cssKey  = `blame-${sanitise(color)}-${sanitise(label)}`;
+      const cssKey  = `blame-${sanitise(userId || label)}-${line}`;
 
       ensureBlameStyle(cssKey, color, label);
 
-      // A zero-width range at the very end of the line
+      // A zero-width range anchored to this exact line so each author tag stays with its line.
       const endCol = model.getLineMaxColumn(line);
       newDecos.push({
         range: new monaco.Range(line, endCol, line, endCol),
         options: {
-          // afterContentClassName adds a ::after pseudo-element after line content
+          // afterContentClassName adds a ::after pseudo-element after line content.
+          // It must be unique per line/user so two tags never share the same CSS output.
           afterContentClassName: cssKey,
           stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
         },
@@ -108,34 +109,39 @@ export default function Editor({
     const monaco = monacoRef.current;
     if (!editor || !monaco) return;
 
+    const activeUserIds = new Set(Object.keys(remoteCursors));
+
+    Object.keys(cursorDecoRef.current).forEach((uid) => {
+      if (!activeUserIds.has(uid)) {
+        const previousIds = cursorDecoRef.current[uid] || [];
+        if (previousIds.length) {
+          editor.deltaDecorations(previousIds, []);
+        }
+        delete cursorDecoRef.current[uid];
+      }
+    });
+
     Object.entries(remoteCursors).forEach(([userId, cursor]) => {
       if (!cursor || userId === currentUserId) return;
       const user = users.find((u) => u.id === userId);
       if (!user) return;
 
-      ensureCursorStyle(userId, user.color);
-      const key  = sanitise(userId);
-      const prev = cursorDecoRef.current[userId] || [];
+      const scopeKey = `cursor-${sanitise(userId)}`;
+      ensureCursorStyle(scopeKey, user.color);
 
-      cursorDecoRef.current[userId] = editor.deltaDecorations(prev, [{
+      const previousIds = cursorDecoRef.current[userId] || [];
+      cursorDecoRef.current[userId] = editor.deltaDecorations(previousIds, [{
         range: new monaco.Range(
           cursor.lineNumber, cursor.column,
           cursor.lineNumber, cursor.column
         ),
         options: {
-          className: `remote-cursor-${key}`,
-          afterContentClassName: `remote-cursor-label-${key}`,
+          className: `remote-cursor-${scopeKey}`,
+          afterContentClassName: `remote-cursor-label-${scopeKey}`,
           stickiness:
             monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
         },
       }]);
-    });
-
-    Object.keys(cursorDecoRef.current).forEach((uid) => {
-      if (!remoteCursors[uid]) {
-        editor.deltaDecorations(cursorDecoRef.current[uid] || [], []);
-        delete cursorDecoRef.current[uid];
-      }
     });
   }, [remoteCursors, users, currentUserId]);
 
@@ -219,17 +225,17 @@ function ensureBlameStyle(cssKey, color, label) {
 }
 
 const _cursorStyles = new Set();
-function ensureCursorStyle(userId, color) {
-  const key = sanitise(userId);
-  if (_cursorStyles.has(key)) return;
-  _cursorStyles.add(key);
+function ensureCursorStyle(scopeKey, color) {
+  if (_cursorStyles.has(scopeKey)) return;
+  _cursorStyles.add(scopeKey);
+
   const s = document.createElement("style");
   s.textContent = `
-    .remote-cursor-${key} {
+    .remote-cursor-${scopeKey} {
       border-left: 2px solid ${color} !important;
       background: ${color}33;
     }
-    .remote-cursor-label-${key}::after {
+    .remote-cursor-label-${scopeKey}::after {
       background: ${color};
       color: #10141A;
       font-size: 11px;

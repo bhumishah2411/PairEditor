@@ -12,6 +12,9 @@ export default function Sidebar({
   activeFile,
   isUploading,
   onUploadFolder,
+  onCreateFile,
+  onRenameFile,
+  onDeleteFile,
   onSelectFile,
 }) {
   return (
@@ -23,6 +26,9 @@ export default function Sidebar({
           activeFile={activeFile}
           isUploading={isUploading}
           onUploadFolder={onUploadFolder}
+          onCreateFile={onCreateFile}
+          onRenameFile={onRenameFile}
+          onDeleteFile={onDeleteFile}
           onSelectFile={onSelectFile}
         />
       </div>

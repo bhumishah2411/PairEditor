@@ -57,6 +57,9 @@ export default function App() {
     emitLineAuthors,
     sendChatMessage,
     uploadFolder,
+    createFile,
+    renameFile,
+    deleteFile,
     switchFile,
   } = useCollaboration({
     socket,
@@ -196,6 +199,9 @@ export default function App() {
                   activeFile={activeFile}
                   isUploading={isUploading}
                   onUploadFolder={uploadFolder}
+                  onCreateFile={createFile}
+                  onRenameFile={renameFile}
+                  onDeleteFile={deleteFile}
                   onSelectFile={switchFile}
                 />
 
