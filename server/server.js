@@ -3,10 +3,13 @@
  * Backend: Express + Socket.IO
  *
  * Architecture overview:
- *  - Rooms are created on-demand when the first user joins.
- *  - Each room stores the current code content in memory.
- *  - Socket.IO broadcasts events to all clients in the same room.
- *  - No CRDT/OT; last-write wins is fine at this scale.
+ *  - Team Rooms: provide presence (members joined with roomId) and team chat.
+ *  - Workspaces: hold code, files, activeFile, line blame, whiteboard, viewMode.
+ *      - Personal workspaces ("personal:<socketId>"): private to each user by default.
+ *      - Session workspaces ("session:<uuid>"): shared collaborative workspaces created
+ *        when users request and accept collaboration.
+ *  - Sockets join "ws:<workspaceId>" to receive scoped editor & whiteboard events.
+ *  - Team chat and presence broadcast to the entire team room.
  */
 
 const express = require("express");
@@ -31,12 +34,35 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
-// ── In-memory store ──────────────────────────────────────────────────────────
+// ── In-memory stores ────────────────────────────────────────────────────────
 /**
- * rooms: Map<roomId, { code, language, users: Map<socketId, userInfo> }>
- * userInfo: { id, name, color, cursor }
+ * rooms: Map<roomId, { users: Map<socketId, userInfo> }>
+ * userInfo: { id, name, color, cursor, workspaceId, workspaceType, sessionId }
  */
 const rooms = new Map();
+
+/**
+ * workspaces: Map<workspaceId, workspaceState>
+ * workspaceState: {
+ *   id,
+ *   type: "personal" | "session",
+ *   code,
+ *   language,
+ *   files: Map<path, { code, language }>,
+ *   activeFile,
+ *   lineAuthors: Map<lineNumber, { name, color, userId }>,
+ *   lineAuthorsByFile: Map<path, Map<lineNumber, authorInfo>>,
+ *   whiteboard: Array,
+ *   viewMode: "code" | "split" | "whiteboard",
+ *   members: Set<socketId>
+ * }
+ */
+const workspaces = new Map();
+
+/**
+ * pendingCollabRequests: Map<`${fromUserId}->${toUserId}`, { fromUserId, toUserId, timestamp }>
+ */
+const pendingCollabRequests = new Map();
 
 /** Predefined user colours so each visitor gets a unique accent */
 const USER_COLORS = [
@@ -48,37 +74,143 @@ const USER_COLORS = [
 function getRoom(roomId) {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, {
-      code: "// Start coding here...\n",
-      language: "javascript",
       users: new Map(),
-      // lineAuthors: Map<lineNumber, { name, color, userId }>
-      // Persists "who last edited this line" across the whole session.
-      lineAuthors: new Map(),
-      // ── Multi-file support ──────────────────────────────────────────────
-      // files: Map<relativePath, { code, language }> — everything uploaded so far.
-      // activeFile: the path currently loaded into the shared `code` buffer above.
-      // Everyone in the room views/edits the SAME active file at once, matching
-      // the existing single-buffer model — switching files switches it for all.
-      files: new Map(),
-      activeFile: null,
-      // lineAuthorsByFile: Map<path, Map<line, authorInfo>> — blame per file,
-      // restored into `lineAuthors` whenever that file becomes active.
-      lineAuthorsByFile: new Map(),
-      // ── Whiteboard collaborative canvas elements ────────────────────────
-      whiteboard: [],
-      // ── Room view mode ('code' | 'split' | 'whiteboard') ─────────────────
-      viewMode: "code",
     });
   }
   return rooms.get(roomId);
 }
 
-/** Serialise a room's file list (path + language only — no content, keeps it light) */
-function fileListFor(room) {
-  return [...room.files.keys()].map((path) => ({
+/** Create a fresh personal workspace for a socket */
+function createPersonalWorkspace(socketId) {
+  return {
+    id: `personal:${socketId}`,
+    type: "personal",
+    code: "// Start coding here...\n",
+    language: "javascript",
+    files: new Map(),
+    activeFile: null,
+    lineAuthors: new Map(),
+    lineAuthorsByFile: new Map(),
+    whiteboard: [],
+    viewMode: "code",
+    members: new Set([socketId]),
+  };
+}
+
+/** Deep clone a workspace state to initialise a shared session */
+function cloneWorkspaceForSession(sourceWs, sessionWsId) {
+  const newFiles = new Map();
+  if (sourceWs?.files) {
+    sourceWs.files.forEach((fileObj, path) => {
+      newFiles.set(path, { code: fileObj.code, language: fileObj.language });
+    });
+  }
+
+  const newLineAuthorsByFile = new Map();
+  if (sourceWs?.lineAuthorsByFile) {
+    sourceWs.lineAuthorsByFile.forEach((blameMap, path) => {
+      newLineAuthorsByFile.set(path, new Map(blameMap));
+    });
+  }
+
+  return {
+    id: sessionWsId,
+    type: "session",
+    code: sourceWs?.code ?? "// Start coding here...\n",
+    language: sourceWs?.language ?? "javascript",
+    files: newFiles,
+    activeFile: sourceWs?.activeFile ?? null,
+    lineAuthors: new Map(sourceWs?.lineAuthors ?? []),
+    lineAuthorsByFile: newLineAuthorsByFile,
+    whiteboard: JSON.parse(JSON.stringify(sourceWs?.whiteboard || [])),
+    viewMode: sourceWs?.viewMode ?? "code",
+    members: new Set(),
+  };
+}
+
+/** Serialise a workspace's file list (path + language only — keeps it lightweight) */
+function fileListFor(ws) {
+  if (!ws || !ws.files) return [];
+  return [...ws.files.keys()].map((path) => ({
     path,
-    language: room.files.get(path).language,
+    language: ws.files.get(path).language,
   }));
+}
+
+/** Format full workspace payload to send to clients */
+function workspaceStatePayload(ws) {
+  return {
+    workspaceId: ws.id,
+    workspaceType: ws.type,
+    code: ws.code,
+    language: ws.language,
+    lineAuthors: Object.fromEntries(ws.lineAuthors),
+    files: fileListFor(ws),
+    activeFile: ws.activeFile,
+    whiteboard: ws.whiteboard || [],
+    viewMode: ws.viewMode || "code",
+  };
+}
+
+/** Format team users list for room presence */
+function getTeamUsers(room) {
+  if (!room || !room.users) return [];
+  return [...room.users.values()].map((u) => ({
+    id: u.id,
+    name: u.name,
+    color: u.color,
+    cursor: u.cursor,
+    workspaceId: u.workspaceId,
+    workspaceType: u.workspaceType || "personal",
+    sessionId: u.sessionId || null,
+  }));
+}
+
+/** Format session member list */
+function getSessionMembers(sessionWs, room) {
+  if (!sessionWs || !room) return [];
+  const list = [];
+  for (const socketId of sessionWs.members) {
+    const u = room.users.get(socketId);
+    if (u) {
+      list.push({ id: u.id, name: u.name, color: u.color });
+    }
+  }
+  return list;
+}
+
+/** Resolve and validate the workspace for a socket */
+function getSocketWorkspace(socket) {
+  if (!socket?.workspaceId) return null;
+  const ws = workspaces.get(socket.workspaceId);
+  if (!ws || !ws.members.has(socket.id)) return null;
+  return ws;
+}
+
+/** Remove a socket from a session workspace and notify peers */
+function removeSocketFromSession(socket, sessionWs, room) {
+  if (!sessionWs || sessionWs.type !== "session") return;
+
+  sessionWs.members.delete(socket.id);
+  socket.leave(`ws:${sessionWs.id}`);
+
+  const user = room?.users.get(socket.id);
+  socket.to(`ws:${sessionWs.id}`).emit("session-member-left", {
+    userId: socket.id,
+    userName: user?.name || "A member",
+  });
+
+  const sessionId = sessionWs.id.replace("session:", "");
+  io.to(`ws:${sessionWs.id}`).emit("session-update", {
+    sessionId,
+    members: getSessionMembers(sessionWs, room),
+  });
+
+  // Delete session workspace if empty
+  if (sessionWs.members.size === 0) {
+    workspaces.delete(sessionWs.id);
+    console.log(`[session:${sessionWs.id}] deleted (all members left)`);
+  }
 }
 
 function guessLanguageFromPath(path) {
@@ -107,7 +239,6 @@ function pickColor(usedColors) {
   for (const c of USER_COLORS) {
     if (!usedColors.includes(c)) return c;
   }
-  // Fallback: random hex
   return "#" + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0");
 }
 
@@ -122,24 +253,41 @@ app.get("/api/room/new", (_req, res) => {
 app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
 
 /**
- * Download everything uploaded to a room as a .zip.
- * Streams directly from the in-memory files map — no temp files on disk.
+ * Download everything uploaded to a workspace as a .zip.
+ * Accepts ?workspaceId= to download personal or session files.
+ * Streams directly from memory — no temp files on disk.
  */
 app.get("/api/room/:roomId/download", (req, res) => {
-  const room = rooms.get(req.params.roomId);
-  if (!room || room.files.size === 0) {
-    return res.status(404).json({ error: "No files uploaded in this room yet." });
+  const { roomId } = req.params;
+  const { workspaceId } = req.query;
+  const room = rooms.get(roomId);
+
+  let targetWs = null;
+  if (workspaceId && workspaces.has(workspaceId)) {
+    targetWs = workspaces.get(workspaceId);
+  } else if (room) {
+    // Fallback: look for the first workspace belonging to this room with files
+    for (const [, ws] of workspaces.entries()) {
+      if (ws.files && ws.files.size > 0) {
+        targetWs = ws;
+        break;
+      }
+    }
+  }
+
+  if (!targetWs || targetWs.files.size === 0) {
+    return res.status(404).json({ error: "No files uploaded to download." });
   }
 
   // Make sure the currently active file reflects the latest live edits
-  if (room.activeFile && room.files.has(room.activeFile)) {
-    room.files.get(room.activeFile).code = room.code;
+  if (targetWs.activeFile && targetWs.files.has(targetWs.activeFile)) {
+    targetWs.files.get(targetWs.activeFile).code = targetWs.code;
   }
 
   res.setHeader("Content-Type", "application/zip");
   res.setHeader(
     "Content-Disposition",
-    `attachment; filename="pairEditor-${req.params.roomId}.zip"`
+    `attachment; filename="pairEditor-${roomId}.zip"`
   );
 
   const archive = archiver("zip", { zlib: { level: 9 } });
@@ -149,7 +297,7 @@ app.get("/api/room/:roomId/download", (req, res) => {
   });
   archive.pipe(res);
 
-  room.files.forEach(({ code }, path) => {
+  targetWs.files.forEach(({ code }, path) => {
     archive.append(code ?? "", { name: path });
   });
 
@@ -169,92 +317,294 @@ io.on("connection", (socket) => {
     const usedColors = [...room.users.values()].map((u) => u.color);
     const color = pickColor(usedColors);
 
-    const userInfo = { id: socket.id, name: userName || "Anonymous", color, cursor: null };
+    // Create a personal workspace for this user
+    const personalWs = createPersonalWorkspace(socket.id);
+    workspaces.set(personalWs.id, personalWs);
+
+    socket.workspaceId = personalWs.id;
+    socket.join(`ws:${personalWs.id}`);
+
+    const userInfo = {
+      id: socket.id,
+      name: userName || "Anonymous",
+      color,
+      cursor: null,
+      workspaceId: personalWs.id,
+      workspaceType: "personal",
+      sessionId: null,
+    };
     room.users.set(socket.id, userInfo);
 
-    console.log(`[room:${roomId}] ${userInfo.name} joined (${socket.id})`);
+    console.log(`[room:${roomId}] ${userInfo.name} joined (personal workspace: ${personalWs.id})`);
 
-    // Send the current code + blame map to the joining user
+    // Send workspace state & team state to joining user
+    const wsState = workspaceStatePayload(personalWs);
+    socket.emit("workspace-state", wsState);
     socket.emit("room-state", {
-      code: room.code,
-      language: room.language,
-      users: [...room.users.values()],
-      // Convert Map → plain object so it survives JSON serialisation
-      lineAuthors: Object.fromEntries(room.lineAuthors),
-      files: fileListFor(room),
-      activeFile: room.activeFile,
-      whiteboard: room.whiteboard || [],
-      viewMode: room.viewMode || "code",
+      ...wsState,
+      users: getTeamUsers(room),
     });
 
-    // Notify everyone else that a new user joined
+    // Notify others in room
     socket.to(roomId).emit("user-joined", userInfo);
 
-    // Broadcast updated user list to everyone in the room
-    io.to(roomId).emit("users-update", [...room.users.values()]);
+    // Broadcast authoritative team presence list
+    const teamUsers = getTeamUsers(room);
+    io.to(roomId).emit("users-update", teamUsers);
+    io.to(roomId).emit("presence-update", teamUsers);
   });
 
-  // ── code-change ────────────────────────────────────────────────────────────
-  socket.on("code-change", ({ roomId, code }) => {
+  // ── Collaboration request / response ───────────────────────────────────────
+  socket.on("collab-request", ({ toUserId }) => {
+    const roomId = socket.roomId;
+    if (!roomId || !toUserId || toUserId === socket.id) return;
+
     const room = rooms.get(roomId);
     if (!room) return;
-    room.code = code; // persist in memory
-    // Also persist into the active file's own record, so switching away and back keeps it
-    if (room.activeFile && room.files.has(room.activeFile)) {
-      room.files.get(room.activeFile).code = code;
+
+    const senderUser = room.users.get(socket.id);
+    const targetUser = room.users.get(toUserId);
+    if (!senderUser || !targetUser) return;
+
+    // Reject if both users are already in the same session
+    if (
+      senderUser.workspaceType === "session" &&
+      senderUser.workspaceId === targetUser.workspaceId
+    ) {
+      return;
     }
-    // Relay to all OTHER clients in the room
-    socket.to(roomId).emit("code-update", { code, senderId: socket.id });
+
+    // Ignore duplicate requests from same sender while pending
+    const reqKey = `${socket.id}->${toUserId}`;
+    if (pendingCollabRequests.has(reqKey)) return;
+
+    pendingCollabRequests.set(reqKey, {
+      fromUserId: socket.id,
+      toUserId,
+      fromName: senderUser.name,
+      fromColor: senderUser.color,
+      timestamp: Date.now(),
+    });
+
+    // Send request popup to target user
+    io.to(toUserId).emit("collab-request-received", {
+      fromUserId: socket.id,
+      fromName: senderUser.name,
+      fromColor: senderUser.color,
+    });
+
+    socket.emit("collab-request-sent", { toUserId });
   });
 
-  // ── language-change ────────────────────────────────────────────────────────
-  socket.on("language-change", ({ roomId, language }) => {
+  socket.on("collab-respond", ({ fromUserId, accept }) => {
+    const roomId = socket.roomId;
+    if (!roomId || !fromUserId) return;
+
+    const reqKey = `${fromUserId}->${socket.id}`;
+    if (!pendingCollabRequests.has(reqKey)) return;
+    pendingCollabRequests.delete(reqKey);
+
     const room = rooms.get(roomId);
     if (!room) return;
-    room.language = language;
-    io.to(roomId).emit("language-update", { language });
+
+    const requesterUser = room.users.get(fromUserId);
+    const targetUser = room.users.get(socket.id);
+    if (!requesterUser || !targetUser) return;
+
+    if (!accept) {
+      // Notify requester that collaboration was declined
+      io.to(fromUserId).emit("collab-declined", {
+        byUserId: socket.id,
+        byName: targetUser.name,
+      });
+      return;
+    }
+
+    const requesterSocket = io.sockets.sockets.get(fromUserId);
+    if (!requesterSocket) return;
+
+    let sessionWs = null;
+    const reqWs = workspaces.get(requesterSocket.workspaceId);
+
+    if (reqWs && reqWs.type === "session") {
+      // Requester is already inside a shared session workspace
+      sessionWs = reqWs;
+    } else {
+      // Requester is in a personal workspace -> create a new session
+      const sessionId = uuidv4().slice(0, 8);
+      const sessionWsId = `session:${sessionId}`;
+      sessionWs = cloneWorkspaceForSession(reqWs, sessionWsId);
+      workspaces.set(sessionWsId, sessionWs);
+
+      // Move requester into the new session workspace
+      if (reqWs) {
+        requesterSocket.leave(`ws:${reqWs.id}`);
+        reqWs.members.delete(fromUserId);
+      }
+      requesterSocket.join(`ws:${sessionWsId}`);
+      requesterSocket.workspaceId = sessionWsId;
+      sessionWs.members.add(fromUserId);
+
+      requesterUser.workspaceId = sessionWsId;
+      requesterUser.workspaceType = "session";
+      requesterUser.sessionId = sessionId;
+
+      requesterSocket.emit("workspace-state", workspaceStatePayload(sessionWs));
+    }
+
+    const sessionWsId = sessionWs.id;
+    const sessionId = sessionWsId.replace("session:", "");
+
+    // Move the accepting user (socket)
+    const targetOldWs = workspaces.get(socket.workspaceId);
+    if (targetOldWs && targetOldWs.id !== sessionWsId) {
+      socket.leave(`ws:${targetOldWs.id}`);
+      targetOldWs.members.delete(socket.id);
+      if (targetOldWs.type === "session") {
+        socket.to(`ws:${targetOldWs.id}`).emit("session-member-left", {
+          userId: socket.id,
+          userName: targetUser.name,
+        });
+        io.to(`ws:${targetOldWs.id}`).emit("session-update", {
+          sessionId: targetOldWs.id.replace("session:", ""),
+          members: getSessionMembers(targetOldWs, room),
+        });
+        if (targetOldWs.members.size === 0) {
+          workspaces.delete(targetOldWs.id);
+        }
+      }
+    }
+
+    socket.join(`ws:${sessionWsId}`);
+    socket.workspaceId = sessionWsId;
+    sessionWs.members.add(socket.id);
+
+    targetUser.workspaceId = sessionWsId;
+    targetUser.workspaceType = "session";
+    targetUser.sessionId = sessionId;
+
+    // Send full session workspace state to accepter
+    socket.emit("workspace-state", workspaceStatePayload(sessionWs));
+
+    // Notify other session members
+    socket.to(`ws:${sessionWsId}`).emit("session-member-joined", { member: targetUser });
+
+    // Broadcast session member update to everyone in this session
+    io.to(`ws:${sessionWsId}`).emit("session-update", {
+      sessionId,
+      members: getSessionMembers(sessionWs, room),
+    });
+
+    // Update presence for everyone in the team room
+    const teamUsers = getTeamUsers(room);
+    io.to(roomId).emit("presence-update", teamUsers);
+    io.to(roomId).emit("users-update", teamUsers);
   });
 
-  // ── cursor-move ────────────────────────────────────────────────────────────
-  socket.on("cursor-move", ({ roomId, cursor }) => {
+  // ── Leave session ──────────────────────────────────────────────────────────
+  socket.on("leave-session", () => {
+    const roomId = socket.roomId;
+    if (!roomId) return;
+
     const room = rooms.get(roomId);
     if (!room) return;
+
     const user = room.users.get(socket.id);
+    if (!user || user.workspaceType !== "session") return;
+
+    const currentWs = workspaces.get(socket.workspaceId);
+    if (currentWs && currentWs.type === "session") {
+      removeSocketFromSession(socket, currentWs, room);
+    }
+
+    // Return to private personal workspace (previous work remains intact)
+    const personalWsId = `personal:${socket.id}`;
+    let personalWs = workspaces.get(personalWsId);
+    if (!personalWs) {
+      personalWs = createPersonalWorkspace(socket.id);
+      workspaces.set(personalWsId, personalWs);
+    }
+
+    personalWs.members.add(socket.id);
+    socket.workspaceId = personalWs.id;
+    socket.join(`ws:${personalWs.id}`);
+
+    user.workspaceId = personalWs.id;
+    user.workspaceType = "personal";
+    user.sessionId = null;
+
+    // Send private workspace state back to user
+    socket.emit("workspace-state", workspaceStatePayload(personalWs));
+    socket.emit("session-update", { sessionId: null, members: [] });
+
+    // Update room presence
+    const teamUsers = getTeamUsers(room);
+    io.to(roomId).emit("presence-update", teamUsers);
+    io.to(roomId).emit("users-update", teamUsers);
+  });
+
+  // ── Scoped workspace editor events ─────────────────────────────────────────
+
+  // Code change
+  socket.on("code-change", ({ code }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    ws.code = code;
+    if (ws.activeFile && ws.files.has(ws.activeFile)) {
+      ws.files.get(ws.activeFile).code = code;
+    }
+    socket.to(`ws:${ws.id}`).emit("code-update", { code, senderId: socket.id });
+  });
+
+  // Language change
+  socket.on("language-change", ({ language }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    ws.language = language;
+    io.to(`ws:${ws.id}`).emit("language-update", { language });
+  });
+
+  // Cursor move
+  socket.on("cursor-move", ({ cursor }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    const room = rooms.get(socket.roomId);
+    const user = room?.users.get(socket.id);
     if (user) user.cursor = cursor;
-    socket.to(roomId).emit("cursor-update", { userId: socket.id, cursor });
+    socket.to(`ws:${ws.id}`).emit("cursor-update", { userId: socket.id, cursor });
   });
 
-  // ── typing indicator ───────────────────────────────────────────────────────
-  socket.on("typing-start", ({ roomId }) => {
-    socket.to(roomId).emit("user-typing", { userId: socket.id });
+  // Typing indicator
+  socket.on("typing-start", () => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    socket.to(`ws:${ws.id}`).emit("user-typing", { userId: socket.id });
   });
 
-  socket.on("typing-stop", ({ roomId }) => {
-    socket.to(roomId).emit("user-stopped-typing", { userId: socket.id });
+  socket.on("typing-stop", () => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    socket.to(`ws:${ws.id}`).emit("user-stopped-typing", { userId: socket.id });
   });
 
-  // ── line-author-update ────────────────────────────────────────────────────
-  // Payload: { roomId, lines: [{ line, name, color, userId }] }
-  // "lines" is the set of line numbers touched in the most recent edit.
-  socket.on("line-author-update", ({ roomId, lines }) => {
-    const room = rooms.get(roomId);
-    if (!room || !Array.isArray(lines)) return;
+  // Line author blame update
+  socket.on("line-author-update", ({ lines }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws || !Array.isArray(lines)) return;
 
-    // Persist each changed line's author in the room state
     lines.forEach((entry) => {
-      room.lineAuthors.set(entry.line, {
+      ws.lineAuthors.set(entry.line, {
         name: entry.name,
         color: entry.color,
         userId: entry.userId,
       });
     });
 
-    // Mirror into the active file's own blame map so it survives file switches
-    if (room.activeFile) {
-      if (!room.lineAuthorsByFile.has(room.activeFile)) {
-        room.lineAuthorsByFile.set(room.activeFile, new Map());
+    if (ws.activeFile) {
+      if (!ws.lineAuthorsByFile.has(ws.activeFile)) {
+        ws.lineAuthorsByFile.set(ws.activeFile, new Map());
       }
-      const fileBlame = room.lineAuthorsByFile.get(room.activeFile);
+      const fileBlame = ws.lineAuthorsByFile.get(ws.activeFile);
       lines.forEach((entry) => {
         fileBlame.set(entry.line, {
           name: entry.name,
@@ -264,203 +614,199 @@ io.on("connection", (socket) => {
       });
     }
 
-    // Relay to all OTHER clients so they update their decorations
-    socket.to(roomId).emit("line-author-update", { lines });
+    socket.to(`ws:${ws.id}`).emit("line-author-update", { lines });
   });
 
-  // ── create-file ─────────────────────────────────────────────────────────────
-  // Payload: { roomId, path, code, language }
-  socket.on("create-file", ({ roomId, path, code, language }) => {
-    const room = rooms.get(roomId);
-    if (!room || !path) return;
+  // Create file
+  socket.on("create-file", ({ path, code, language }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws || !path) return;
 
     const safePath = String(path).replace(/^\/+/, "");
-    const existing = room.files.get(safePath);
+    const existing = ws.files.get(safePath);
     if (existing) {
-      room.activeFile = safePath;
-      room.code = existing.code;
-      room.language = existing.language;
-      io.to(roomId).emit("files-update", { files: fileListFor(room), activeFile: room.activeFile });
-      io.to(roomId).emit("active-file-changed", {
-        path: room.activeFile,
-        code: room.code,
-        language: room.language,
-        lineAuthors: Object.fromEntries(room.lineAuthors),
+      ws.activeFile = safePath;
+      ws.code = existing.code;
+      ws.language = existing.language;
+      io.to(`ws:${ws.id}`).emit("files-update", { files: fileListFor(ws), activeFile: ws.activeFile });
+      io.to(`ws:${ws.id}`).emit("active-file-changed", {
+        path: ws.activeFile,
+        code: ws.code,
+        language: ws.language,
+        lineAuthors: Object.fromEntries(ws.lineAuthors),
       });
       return;
     }
 
     const fileLanguage = language || guessLanguageFromPath(safePath);
-    room.files.set(safePath, { code: code || "", language: fileLanguage });
-    room.activeFile = safePath;
-    room.code = room.files.get(safePath).code;
-    room.language = room.files.get(safePath).language;
-    room.lineAuthors = new Map();
+    ws.files.set(safePath, { code: code || "", language: fileLanguage });
+    ws.activeFile = safePath;
+    ws.code = ws.files.get(safePath).code;
+    ws.language = ws.files.get(safePath).language;
+    ws.lineAuthors = new Map();
 
-    io.to(roomId).emit("files-update", { files: fileListFor(room), activeFile: room.activeFile });
-    io.to(roomId).emit("active-file-changed", {
-      path: room.activeFile,
-      code: room.code,
-      language: room.language,
+    io.to(`ws:${ws.id}`).emit("files-update", { files: fileListFor(ws), activeFile: ws.activeFile });
+    io.to(`ws:${ws.id}`).emit("active-file-changed", {
+      path: ws.activeFile,
+      code: ws.code,
+      language: ws.language,
       lineAuthors: {},
     });
   });
 
-  // ── rename-file ───────────────────────────────────────────────────────────
-  // Payload: { roomId, oldPath, newPath }
-  socket.on("rename-file", ({ roomId, oldPath, newPath }) => {
-    const room = rooms.get(roomId);
-    if (!room || !oldPath || !newPath) return;
+  // Rename file
+  socket.on("rename-file", ({ oldPath, newPath }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws || !oldPath || !newPath) return;
 
     const oldNormalized = String(oldPath).replace(/^\/+/, "");
     const newNormalized = String(newPath).replace(/^\/+/, "");
 
     if (oldNormalized === newNormalized) return;
-    if (room.files.has(newNormalized)) {
-      socket.emit("rename-file-error", { message: `A file named "${newNormalized}" already exists in this room.` });
+    if (ws.files.has(newNormalized)) {
+      socket.emit("rename-file-error", { message: `A file named "${newNormalized}" already exists.` });
       return;
     }
 
-    const fileEntry = room.files.get(oldNormalized);
+    const fileEntry = ws.files.get(oldNormalized);
     if (!fileEntry) return;
 
-    const wasActive = room.activeFile === oldNormalized;
-    room.files.delete(oldNormalized);
-    room.files.set(newNormalized, { ...fileEntry });
+    const wasActive = ws.activeFile === oldNormalized;
+    ws.files.delete(oldNormalized);
+    ws.files.set(newNormalized, { ...fileEntry });
 
-    const existingBlame = room.lineAuthorsByFile.get(oldNormalized);
+    const existingBlame = ws.lineAuthorsByFile.get(oldNormalized);
     if (existingBlame) {
-      room.lineAuthorsByFile.set(newNormalized, new Map(existingBlame));
-      room.lineAuthorsByFile.delete(oldNormalized);
+      ws.lineAuthorsByFile.set(newNormalized, new Map(existingBlame));
+      ws.lineAuthorsByFile.delete(oldNormalized);
     }
 
     if (wasActive) {
-      room.activeFile = newNormalized;
-      room.code = room.files.get(newNormalized).code;
-      room.language = room.files.get(newNormalized).language;
-      room.lineAuthors = room.lineAuthorsByFile.get(newNormalized) || new Map();
-      io.to(roomId).emit("active-file-changed", {
-        path: room.activeFile,
-        code: room.code,
-        language: room.language,
-        lineAuthors: Object.fromEntries(room.lineAuthors),
+      ws.activeFile = newNormalized;
+      ws.code = ws.files.get(newNormalized).code;
+      ws.language = ws.files.get(newNormalized).language;
+      ws.lineAuthors = ws.lineAuthorsByFile.get(newNormalized) || new Map();
+      io.to(`ws:${ws.id}`).emit("active-file-changed", {
+        path: ws.activeFile,
+        code: ws.code,
+        language: ws.language,
+        lineAuthors: Object.fromEntries(ws.lineAuthors),
       });
     }
 
-    io.to(roomId).emit("files-update", { files: fileListFor(room), activeFile: room.activeFile });
+    io.to(`ws:${ws.id}`).emit("files-update", { files: fileListFor(ws), activeFile: ws.activeFile });
   });
 
-  // ── delete-file ───────────────────────────────────────────────────────────
-  // Payload: { roomId, path }
-  socket.on("delete-file", ({ roomId, path }) => {
-    const room = rooms.get(roomId);
-    if (!room || !path) return;
+  // Delete file
+  socket.on("delete-file", ({ path }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws || !path) return;
 
     const target = String(path).replace(/^\/+/, "");
-    if (!room.files.has(target)) return;
+    if (!ws.files.has(target)) return;
 
-    const wasActive = room.activeFile === target;
-    room.files.delete(target);
-    room.lineAuthorsByFile.delete(target);
+    const wasActive = ws.activeFile === target;
+    ws.files.delete(target);
+    ws.lineAuthorsByFile.delete(target);
 
     if (wasActive) {
-      if (room.files.size > 0) {
-        const nextPath = [...room.files.keys()][0];
-        room.activeFile = nextPath;
-        room.code = room.files.get(nextPath).code;
-        room.language = room.files.get(nextPath).language;
-        room.lineAuthors = room.lineAuthorsByFile.get(nextPath) || new Map();
-        io.to(roomId).emit("active-file-changed", {
-          path: room.activeFile,
-          code: room.code,
-          language: room.language,
-          lineAuthors: Object.fromEntries(room.lineAuthors),
+      if (ws.files.size > 0) {
+        const nextPath = [...ws.files.keys()][0];
+        ws.activeFile = nextPath;
+        ws.code = ws.files.get(nextPath).code;
+        ws.language = ws.files.get(nextPath).language;
+        ws.lineAuthors = ws.lineAuthorsByFile.get(nextPath) || new Map();
+        io.to(`ws:${ws.id}`).emit("active-file-changed", {
+          path: ws.activeFile,
+          code: ws.code,
+          language: ws.language,
+          lineAuthors: Object.fromEntries(ws.lineAuthors),
         });
       } else {
-        room.activeFile = null;
-        room.code = "// Start coding here...\n";
-        room.language = "javascript";
-        room.lineAuthors = new Map();
-        io.to(roomId).emit("active-file-changed", {
+        ws.activeFile = null;
+        ws.code = "// Start coding here...\n";
+        ws.language = "javascript";
+        ws.lineAuthors = new Map();
+        io.to(`ws:${ws.id}`).emit("active-file-changed", {
           path: null,
-          code: room.code,
-          language: room.language,
+          code: ws.code,
+          language: ws.language,
           lineAuthors: {},
         });
       }
     }
 
-    io.to(roomId).emit("files-update", { files: fileListFor(room), activeFile: room.activeFile });
+    io.to(`ws:${ws.id}`).emit("files-update", { files: fileListFor(ws), activeFile: ws.activeFile });
   });
 
-  // ── upload-folder ───────────────────────────────────────────────────────────
-  // Payload: { roomId, files: [{ path, content, language }] }
-  // Merges a batch of uploaded files into the room. If nothing is active yet,
-  // the first uploaded file becomes the shared active buffer for everyone.
-  socket.on("upload-folder", ({ roomId, files }) => {
-    const room = rooms.get(roomId);
-    if (!room || !Array.isArray(files) || !files.length) return;
+  // Upload folder
+  socket.on("upload-folder", ({ files }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws || !Array.isArray(files) || !files.length) return;
 
     files.forEach(({ path, content, language }) => {
-      room.files.set(path, { code: content, language: language || "plaintext" });
+      ws.files.set(path, { code: content, language: language || "plaintext" });
     });
 
     let activeChanged = false;
-    if (!room.activeFile) {
-      room.activeFile = files[0].path;
-      const active = room.files.get(room.activeFile);
-      room.code = active.code;
-      room.language = active.language;
-      room.lineAuthors = new Map(); // fresh file, no blame yet
+    if (!ws.activeFile) {
+      ws.activeFile = files[0].path;
+      const active = ws.files.get(ws.activeFile);
+      ws.code = active.code;
+      ws.language = active.language;
+      ws.lineAuthors = new Map();
       activeChanged = true;
     }
 
-    const payload = { files: fileListFor(room), activeFile: room.activeFile };
-    io.to(roomId).emit("files-update", payload);
+    const payload = { files: fileListFor(ws), activeFile: ws.activeFile };
+    io.to(`ws:${ws.id}`).emit("files-update", payload);
 
     if (activeChanged) {
-      io.to(roomId).emit("active-file-changed", {
-        path: room.activeFile,
-        code: room.code,
-        language: room.language,
+      io.to(`ws:${ws.id}`).emit("active-file-changed", {
+        path: ws.activeFile,
+        code: ws.code,
+        language: ws.language,
         lineAuthors: {},
       });
     }
   });
 
-  // ── switch-file ──────────────────────────────────────────────────────────────
-  // Everyone in the room shares one buffer, so switching the active file
-  // switches it for the whole room — matches the pair-programming model.
-  socket.on("switch-file", ({ roomId, path }) => {
-    const room = rooms.get(roomId);
-    if (!room || !room.files.has(path)) return;
+  // Switch active file
+  socket.on("switch-file", ({ path }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws || !ws.files.has(path)) return;
 
-    // Persist the outgoing file's latest code + blame before switching away
-    if (room.activeFile && room.files.has(room.activeFile)) {
-      room.files.get(room.activeFile).code = room.code;
-      room.lineAuthorsByFile.set(room.activeFile, new Map(
-        Object.entries(Object.fromEntries(room.lineAuthors)).map(
-          ([line, v]) => [Number(line), v]
+    if (ws.activeFile && ws.files.has(ws.activeFile)) {
+      ws.files.get(ws.activeFile).code = ws.code;
+      ws.lineAuthorsByFile.set(
+        ws.activeFile,
+        new Map(
+          Object.entries(Object.fromEntries(ws.lineAuthors)).map(([line, v]) => [
+            Number(line),
+            v,
+          ])
         )
-      ));
+      );
     }
 
-    room.activeFile = path;
-    const active = room.files.get(path);
-    room.code = active.code;
-    room.language = active.language;
-    room.lineAuthors = room.lineAuthorsByFile.get(path) || new Map();
+    ws.activeFile = path;
+    const active = ws.files.get(path);
+    ws.code = active.code;
+    ws.language = active.language;
+    ws.lineAuthors = ws.lineAuthorsByFile.get(path) || new Map();
 
-    io.to(roomId).emit("active-file-changed", {
+    io.to(`ws:${ws.id}`).emit("active-file-changed", {
       path,
-      code: room.code,
-      language: room.language,
-      lineAuthors: Object.fromEntries(room.lineAuthors),
+      code: ws.code,
+      language: ws.language,
+      lineAuthors: Object.fromEntries(ws.lineAuthors),
     });
   });
 
-  // ── chat message ───────────────────────────────────────────────────────────
-  socket.on("chat-message", ({ roomId, message }) => {
+  // ── Team Chat (stays room-wide for all members in the room) ────────────────
+  socket.on("chat-message", ({ message }) => {
+    const roomId = socket.roomId;
+    if (!roomId) return;
     const room = rooms.get(roomId);
     if (!room) return;
     const user = room.users.get(socket.id);
@@ -475,23 +821,26 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("chat-message", payload);
   });
 
-  // ── whiteboard events ──────────────────────────────────────────────────────
-  socket.on("whiteboard-update", ({ roomId, elements }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    room.whiteboard = Array.isArray(elements) ? elements : [];
-    socket.to(roomId).emit("whiteboard-update", { elements: room.whiteboard });
+  // ── Scoped Whiteboard events ───────────────────────────────────────────────
+  socket.on("whiteboard-update", ({ elements }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    ws.whiteboard = Array.isArray(elements) ? elements : [];
+    socket.to(`ws:${ws.id}`).emit("whiteboard-update", { elements: ws.whiteboard });
   });
 
-  socket.on("whiteboard-draw-step", ({ roomId, stroke }) => {
-    socket.to(roomId).emit("whiteboard-draw-step", { stroke, userId: socket.id });
+  socket.on("whiteboard-draw-step", ({ stroke }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    socket.to(`ws:${ws.id}`).emit("whiteboard-draw-step", { stroke, userId: socket.id });
   });
 
-  socket.on("whiteboard-cursor", ({ roomId, cursor }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    const user = room.users.get(socket.id);
-    socket.to(roomId).emit("whiteboard-cursor-update", {
+  socket.on("whiteboard-cursor", ({ cursor }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    const room = rooms.get(socket.roomId);
+    const user = room?.users.get(socket.id);
+    socket.to(`ws:${ws.id}`).emit("whiteboard-cursor-update", {
       userId: socket.id,
       userName: user?.name || "Peer",
       color: user?.color || "#6FE3A6",
@@ -499,27 +848,28 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("whiteboard-clear", ({ roomId }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    room.whiteboard = [];
-    io.to(roomId).emit("whiteboard-update", { elements: [] });
+  socket.on("whiteboard-clear", () => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    ws.whiteboard = [];
+    io.to(`ws:${ws.id}`).emit("whiteboard-update", { elements: [] });
   });
 
-  // ── view-mode-change ──────────────────────────────────────────────────────
-  socket.on("view-mode-change", ({ roomId, viewMode }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    room.viewMode = viewMode;
-    const user = room.users.get(socket.id);
-    io.to(roomId).emit("view-mode-update", {
+  // ── Scoped View Mode Change (syncs only inside current workspace) ───────────
+  socket.on("view-mode-change", ({ viewMode }) => {
+    const ws = getSocketWorkspace(socket);
+    if (!ws) return;
+    ws.viewMode = viewMode;
+    const room = rooms.get(socket.roomId);
+    const user = room?.users.get(socket.id);
+    io.to(`ws:${ws.id}`).emit("view-mode-update", {
       viewMode,
       senderName: user?.name || "Peer",
       senderId: socket.id,
     });
   });
 
-  // ── disconnect ─────────────────────────────────────────────────────────────
+  // ── Disconnect ─────────────────────────────────────────────────────────────
   socket.on("disconnect", () => {
     const roomId = socket.roomId;
     if (!roomId) return;
@@ -532,11 +882,39 @@ io.on("connection", (socket) => {
 
     console.log(`[-] Socket disconnected: ${socket.id} from room ${roomId}`);
 
-    // Notify remaining users
-    socket.to(roomId).emit("user-left", { userId: socket.id });
-    io.to(roomId).emit("users-update", [...room.users.values()]);
+    // If socket was inside a session workspace, remove them and notify peers
+    if (socket.workspaceId) {
+      const currentWs = workspaces.get(socket.workspaceId);
+      if (currentWs && currentWs.type === "session") {
+        removeSocketFromSession(socket, currentWs, room);
+      }
+    }
 
-    // Clean up empty rooms after 30 mins (avoid memory leaks)
+    // Clean up personal workspace
+    workspaces.delete(`personal:${socket.id}`);
+
+    // Clean up pending requests involving this socket
+    for (const [key, req] of pendingCollabRequests.entries()) {
+      if (req.fromUserId === socket.id) {
+        pendingCollabRequests.delete(key);
+        io.to(req.toUserId).emit("collab-request-cancelled", { fromUserId: socket.id });
+      } else if (req.toUserId === socket.id) {
+        pendingCollabRequests.delete(key);
+        io.to(req.fromUserId).emit("collab-declined", {
+          byUserId: socket.id,
+          byName: user?.name || "Peer",
+          reason: "User disconnected",
+        });
+      }
+    }
+
+    // Notify room of departure
+    socket.to(roomId).emit("user-left", { userId: socket.id });
+    const teamUsers = getTeamUsers(room);
+    io.to(roomId).emit("users-update", teamUsers);
+    io.to(roomId).emit("presence-update", teamUsers);
+
+    // Clean up empty rooms after 30 mins
     if (room.users.size === 0) {
       setTimeout(() => {
         if (rooms.get(roomId)?.users.size === 0) {
