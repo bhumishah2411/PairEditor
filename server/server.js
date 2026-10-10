@@ -187,9 +187,57 @@ function getSocketWorkspace(socket) {
   return ws;
 }
 
-/** Remove a socket from a session workspace and notify peers */
+/** Deep clone a workspace state to create a private workspace for a user leaving a session */
+function cloneWorkspaceForPersonal(sourceWs, personalWsId) {
+  if (sourceWs?.activeFile && sourceWs?.files?.has(sourceWs.activeFile)) {
+    sourceWs.files.get(sourceWs.activeFile).code = sourceWs.code;
+  }
+
+  const newFiles = new Map();
+  if (sourceWs?.files) {
+    sourceWs.files.forEach((fileObj, path) => {
+      newFiles.set(path, { code: String(fileObj.code ?? ""), language: fileObj.language || "plaintext" });
+    });
+  }
+
+  const newLineAuthorsByFile = new Map();
+  if (sourceWs?.lineAuthorsByFile) {
+    sourceWs.lineAuthorsByFile.forEach((blameMap, path) => {
+      newLineAuthorsByFile.set(path, new Map(blameMap));
+    });
+  }
+
+  let clonedWhiteboard = [];
+  try {
+    clonedWhiteboard = structuredClone(sourceWs?.whiteboard || []);
+  } catch {
+    clonedWhiteboard = JSON.parse(JSON.stringify(sourceWs?.whiteboard || []));
+  }
+
+  const socketId = personalWsId.replace("personal:", "");
+
+  return {
+    id: personalWsId,
+    type: "personal",
+    code: String(sourceWs?.code ?? "// Start coding here...\n"),
+    language: sourceWs?.language ?? "javascript",
+    files: newFiles,
+    activeFile: sourceWs?.activeFile ?? null,
+    lineAuthors: new Map(sourceWs?.lineAuthors ?? []),
+    lineAuthorsByFile: newLineAuthorsByFile,
+    whiteboard: clonedWhiteboard,
+    viewMode: sourceWs?.viewMode ?? "code",
+    members: new Set([socketId]),
+  };
+}
+
+/** Remove a socket from a session workspace, notify peers, and dissolve session if 0 or 1 members remain */
 function removeSocketFromSession(socket, sessionWs, room) {
   if (!sessionWs || sessionWs.type !== "session") return;
+
+  if (sessionWs.activeFile && sessionWs.files.has(sessionWs.activeFile)) {
+    sessionWs.files.get(sessionWs.activeFile).code = sessionWs.code;
+  }
 
   sessionWs.members.delete(socket.id);
   socket.leave(`ws:${sessionWs.id}`);
@@ -200,16 +248,50 @@ function removeSocketFromSession(socket, sessionWs, room) {
     userName: user?.name || "A member",
   });
 
-  const sessionId = sessionWs.id.replace("session:", "");
-  io.to(`ws:${sessionWs.id}`).emit("session-update", {
-    sessionId,
-    members: getSessionMembers(sessionWs, room),
-  });
+  // If only 1 member remains in the session, move that member to a private workspace too
+  if (sessionWs.members.size === 1) {
+    const remainingSocketId = [...sessionWs.members][0];
+    const remainingSocket = io.sockets.sockets.get(remainingSocketId);
+    const remainingUser = room?.users.get(remainingSocketId);
 
-  // Delete session workspace if empty
-  if (sessionWs.members.size === 0) {
+    const remainingPersonalWsId = `personal:${remainingSocketId}`;
+    const remainingPersonalWs = cloneWorkspaceForPersonal(sessionWs, remainingPersonalWsId);
+    workspaces.set(remainingPersonalWsId, remainingPersonalWs);
+
+    if (remainingSocket) {
+      remainingSocket.leave(`ws:${sessionWs.id}`);
+      remainingSocket.join(`ws:${remainingPersonalWsId}`);
+      remainingSocket.workspaceId = remainingPersonalWsId;
+
+      remainingSocket.emit("workspace-state", workspaceStatePayload(remainingPersonalWs));
+      remainingSocket.emit("session-ended", {
+        reason: "solo",
+        message: "Session ended, you are now working solo",
+      });
+      remainingSocket.emit("session-update", {
+        sessionId: null,
+        members: [],
+      });
+    }
+
+    if (remainingUser) {
+      remainingUser.workspaceId = remainingPersonalWsId;
+      remainingUser.workspaceType = "personal";
+      remainingUser.sessionId = null;
+    }
+
     workspaces.delete(sessionWs.id);
-    console.log(`[session:${sessionWs.id}] deleted (all members left)`);
+    console.log(`[session:${sessionWs.id}] dissolved (only 1 member remained, moved to solo)`);
+  } else if (sessionWs.members.size > 1) {
+    const sessionId = sessionWs.id.replace("session:", "");
+    io.to(`ws:${sessionWs.id}`).emit("session-update", {
+      sessionId,
+      members: getSessionMembers(sessionWs, room),
+    });
+  } else {
+    // 0 members remain
+    workspaces.delete(sessionWs.id);
+    console.log(`[session:${sessionWs.id}] deleted (0 members left)`);
   }
 }
 
@@ -513,18 +595,22 @@ io.on("connection", (socket) => {
     if (!user || user.workspaceType !== "session") return;
 
     const currentWs = workspaces.get(socket.workspaceId);
-    if (currentWs && currentWs.type === "session") {
-      removeSocketFromSession(socket, currentWs, room);
+    if (!currentWs || currentWs.type !== "session") return;
+
+    // Ensure active file in session has latest edits
+    if (currentWs.activeFile && currentWs.files.has(currentWs.activeFile)) {
+      currentWs.files.get(currentWs.activeFile).code = currentWs.code;
     }
 
-    // Return to private personal workspace (previous work remains intact)
+    // 1. Initialise personal workspace with a snapshot COPY of current session state
     const personalWsId = `personal:${socket.id}`;
-    let personalWs = workspaces.get(personalWsId);
-    if (!personalWs) {
-      personalWs = createPersonalWorkspace(socket.id);
-      workspaces.set(personalWsId, personalWs);
-    }
+    const personalWs = cloneWorkspaceForPersonal(currentWs, personalWsId);
+    workspaces.set(personalWsId, personalWs);
 
+    // 2. Remove socket from the session (handles dissolution if only 1 member remains)
+    removeSocketFromSession(socket, currentWs, room);
+
+    // 3. Move socket into their personal workspace
     personalWs.members.add(socket.id);
     socket.workspaceId = personalWs.id;
     socket.join(`ws:${personalWs.id}`);
@@ -533,11 +619,11 @@ io.on("connection", (socket) => {
     user.workspaceType = "personal";
     user.sessionId = null;
 
-    // Send private workspace state back to user
+    // 4. Send fresh personal workspace state to leaver
     socket.emit("workspace-state", workspaceStatePayload(personalWs));
     socket.emit("session-update", { sessionId: null, members: [] });
 
-    // Update room presence
+    // 5. Update team room presence
     const teamUsers = getTeamUsers(room);
     io.to(roomId).emit("presence-update", teamUsers);
     io.to(roomId).emit("users-update", teamUsers);

@@ -24,6 +24,7 @@ import Whiteboard     from "./components/Whiteboard";
 import ChatPanel      from "./components/ChatPanel";
 import OutputPanel    from "./components/OutputPanel";
 import CollabRequests from "./components/CollabRequests";
+import LeaveConfirmModal from "./components/LeaveConfirmModal";
 
 export default function App() {
   // ── Theme ────────────────────────────────────────────────────────────────
@@ -89,10 +90,20 @@ export default function App() {
   });
 
   // ── UI state ──────────────────────────────────────────────────────────────
-  const [showChat,   setShowChat]   = useState(false);
-  const [showOutput, setShowOutput] = useState(false);
-  const [output,     setOutput]     = useState(null);
-  const [isRunning,  setIsRunning]  = useState(false);
+  const [showChat,       setShowChat]       = useState(false);
+  const [showOutput,     setShowOutput]     = useState(false);
+  const [output,         setOutput]         = useState(null);
+  const [isRunning,      setIsRunning]      = useState(false);
+  const [showLeaveModal, setShowLeaveModal] = useState(false);
+  const [isLeaving,      setIsLeaving]      = useState(false);
+
+  const handleConfirmLeave = () => {
+    if (isLeaving) return;
+    setIsLeaving(true);
+    leaveSession();
+    setShowLeaveModal(false);
+    setIsLeaving(false);
+  };
 
   // ── Toasts for team room & session events ─────────────────────────────────
   useEffect(() => {
@@ -128,6 +139,13 @@ export default function App() {
       });
     };
 
+    const onSessionEnded = ({ message }) => {
+      toast(message || "Session ended, you are now working solo", {
+        icon: "ℹ️",
+        style: toastStyle,
+      });
+    };
+
     const onCollabDeclined = ({ byName, reason }) => {
       toast.error(`${byName || "Peer"} declined your request${reason ? ` (${reason})` : ""}`, {
         style: toastStyle,
@@ -145,6 +163,7 @@ export default function App() {
     socket.on("user-left", left);
     socket.on("session-member-joined", onSessionMemberJoined);
     socket.on("session-member-left", onSessionMemberLeft);
+    socket.on("session-ended", onSessionEnded);
     socket.on("collab-declined", onCollabDeclined);
     socket.on("collab-request-sent", onCollabRequestSent);
 
@@ -153,6 +172,7 @@ export default function App() {
       socket.off("user-left", left);
       socket.off("session-member-joined", onSessionMemberJoined);
       socket.off("session-member-left", onSessionMemberLeft);
+      socket.off("session-ended", onSessionEnded);
       socket.off("collab-declined", onCollabDeclined);
       socket.off("collab-request-sent", onCollabRequestSent);
     };
@@ -227,6 +247,14 @@ export default function App() {
         onRespond={respondToRequest}
       />
 
+      {/* Leave session confirmation dialog */}
+      <LeaveConfirmModal
+        isOpen={showLeaveModal}
+        onClose={() => setShowLeaveModal(false)}
+        onConfirm={handleConfirmLeave}
+        isLeaving={isLeaving}
+      />
+
       <div className={`h-screen flex flex-col overflow-hidden ${isDark ? "dark" : "light"}`}>
         <AnimatePresence mode="wait">
           {!session ? (
@@ -243,7 +271,7 @@ export default function App() {
                 workspaceType={workspaceType}
                 workspaceId={workspaceId}
                 sessionMembers={sessionMembers}
-                onLeaveSession={leaveSession}
+                onLeaveSession={() => setShowLeaveModal(true)}
                 language={language}
                 connected={connected}
                 isDark={isDark}
@@ -269,6 +297,7 @@ export default function App() {
                   sessionId={sessionId}
                   outgoingRequests={outgoingRequests}
                   onSendCollabRequest={sendCollabRequest}
+                  onOpenLeaveModal={() => setShowLeaveModal(true)}
                   files={files}
                   activeFile={activeFile}
                   isUploading={isUploading}

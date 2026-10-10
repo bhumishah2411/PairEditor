@@ -103,11 +103,11 @@ export default function Toolbar({
               <button
                 id="btn-leave-session"
                 onClick={onLeaveSession}
-                className="flex items-center gap-1 px-2.5 py-1 rounded bg-danger/10 border border-danger/30 text-danger hover:bg-danger/20 font-mono text-xs font-semibold transition-colors"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-danger/10 border border-danger/30 text-danger hover:bg-danger/20 font-mono text-xs font-semibold transition-colors shadow-sm"
                 title="Leave session and return to your private workspace"
               >
                 <LogOut size={12} />
-                <span>leave</span>
+                <span>leave session</span>
               </button>
             </div>
           ) : (

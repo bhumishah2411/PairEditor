@@ -145,6 +145,12 @@ export function useCollaboration({ socket, roomId, userName }) {
       setWorkspaceType(sid ? "session" : "personal");
     });
 
+    socket.on("session-ended", () => {
+      setSessionId(null);
+      setSessionMembers([]);
+      setWorkspaceType("personal");
+    });
+
     // ── Collaboration Request Listeners ─────────────────────────────────────
     socket.on("collab-request-received", (req) => {
       setIncomingRequests((prev) => {
@@ -262,6 +268,7 @@ export function useCollaboration({ socket, roomId, userName }) {
       socket.off("user-joined");
       socket.off("user-left");
       socket.off("session-update");
+      socket.off("session-ended");
       socket.off("collab-request-received");
       socket.off("collab-request-cancelled");
       socket.off("collab-request-sent");

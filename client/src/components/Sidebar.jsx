@@ -4,7 +4,7 @@
  *   - Team presence list below with personal/session indicators and collaborate/invite buttons
  */
 import { motion, AnimatePresence } from "framer-motion";
-import { UserPlus, Check, Users } from "lucide-react";
+import { UserPlus, Check, Users, LogOut } from "lucide-react";
 import FileExplorer from "./FileExplorer";
 
 export default function Sidebar({
@@ -15,6 +15,7 @@ export default function Sidebar({
   sessionId = null,
   outgoingRequests = new Set(),
   onSendCollabRequest,
+  onOpenLeaveModal,
   files,
   activeFile,
   isUploading,
@@ -112,7 +113,19 @@ export default function Sidebar({
                   {/* Collaboration action button */}
                   <div className="shrink-0">
                     {isMe ? (
-                      <span className="w-1.5 h-1.5 rounded-full bg-signal inline-block" />
+                      workspaceType === "session" ? (
+                        <button
+                          onClick={onOpenLeaveModal}
+                          id="btn-sidebar-leave-session"
+                          className="flex items-center gap-1 font-mono text-[10px] text-danger hover:bg-danger/20 bg-danger/10 px-2 py-0.5 rounded border border-danger/30 transition-colors font-semibold"
+                          title="Leave this session and work separately"
+                        >
+                          <LogOut size={10} />
+                          <span>leave</span>
+                        </button>
+                      ) : (
+                        <span className="w-1.5 h-1.5 rounded-full bg-signal inline-block" />
+                      )
                     ) : inMySession ? (
                       <span
                         className="inline-flex items-center gap-1 font-mono text-[10px] text-signal font-medium bg-signal/10 px-1.5 py-0.5 rounded border border-signal/20"
