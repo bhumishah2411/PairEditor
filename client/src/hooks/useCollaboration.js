@@ -2,43 +2,49 @@
  * useCollaboration – orchestrates all real-time collaboration state.
  *
  * Handles:
- *  - Joining a room and receiving initial state
- *  - Sending/receiving code changes
- *  - Cursor tracking
- *  - User list management
- *  - Typing indicators
- *  - Chat messages
- *  - Line-level authorship ("who last edited this line")
+ *  - Personal workspaces vs shared session workspaces
+ *  - Joining a team room and receiving initial workspace state
+ *  - Sending/receiving code changes (scoped to current workspace)
+ *  - Cursor tracking & line authorship blame (scoped to current workspace)
+ *  - Multi-file explorer & upload actions
+ *  - Whiteboard drawing & syncing (scoped to current workspace)
+ *  - Team-wide chat and presence
+ *  - Collaboration invites: send request, accept/decline, leave session
  */
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { languageForPath, shouldIncludeFile } from "../utils/fileTree";
 
 export function useCollaboration({ socket, roomId, userName }) {
-  const [code, setCode]           = useState("// Start coding here...\n");
-  const [language, setLanguageSt] = useState("javascript");
-  const [users, setUsers]         = useState([]);
+  // ── Current Workspace Content ─────────────────────────────────────────────
+  const [code, setCode]               = useState("// Start coding here...\n");
+  const [language, setLanguageSt]     = useState("javascript");
+  const [lineAuthors, setLineAuthors] = useState({});
+  const [files, setFiles]             = useState([]);
+  const [activeFile, setActiveFile]   = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
+
+  // ── Scoped Workspace Meta ─────────────────────────────────────────────────
+  const [workspaceType, setWorkspaceType]   = useState("personal"); // "personal" | "session"
+  const [workspaceId, setWorkspaceId]       = useState(null);
+  const [sessionId, setSessionId]           = useState(null);
+  const [sessionMembers, setSessionMembers] = useState([]);
+
+  // ── Team Presence & Collaboration Requests ────────────────────────────────
+  const [teamUsers, setTeamUsers]               = useState([]);
+  const [incomingRequests, setIncomingRequests] = useState([]);
+  const [outgoingRequests, setOutgoingRequests] = useState(new Set());
+
+  // ── Cursors, Typing & Chat ────────────────────────────────────────────────
   const [remoteCursors, setRemoteCursors] = useState({});
   const [typingUsers, setTypingUsers]     = useState(new Set());
   const [chatMessages, setChatMessages]   = useState([]);
-  /**
-   * lineAuthors: { [lineNumber]: { name, color, userId } }
-   * Tracks who last touched each line of code in the room.
-   */
-  const [lineAuthors, setLineAuthors] = useState({});
-  /**
-   * files: [{ path, language }] — everything uploaded to the room so far.
-   * activeFile: path of the file currently loaded into the shared `code` buffer.
-   */
-  const [files, setFiles]           = useState([]);
-  const [activeFile, setActiveFile] = useState(null);
-  const [isUploading, setIsUploading] = useState(false);
 
-  // ── Whiteboard collaborative state ───────────────────────────────────────
-  const [whiteboardElements, setWhiteboardElements] = useState([]);
+  // ── Whiteboard collaborative state ────────────────────────────────────────
+  const [whiteboardElements, setWhiteboardElements]           = useState([]);
   const [remoteWhiteboardCursors, setRemoteWhiteboardCursors] = useState({});
-  const [remoteLiveStroke, setRemoteLiveStroke] = useState(null);
+  const [remoteLiveStroke, setRemoteLiveStroke]               = useState(null);
 
-  // ── Room-wide synchronized view mode ('code' | 'split' | 'whiteboard') ───
+  // ── Workspace-scoped synchronized view mode ('code' | 'split' | 'whiteboard')
   const [viewMode, setViewMode] = useState("code");
 
   // Prevent looping our own code-change back into the editor
@@ -46,35 +52,75 @@ export function useCollaboration({ socket, roomId, userName }) {
   const typingTimer    = useRef(null);
   const hasJoined      = useRef(false);
 
-  // ── Join room once socket + roomId are ready ─────────────────────────────
+  // ── Active workspace users (for Monaco cursor/blame rendering) ───────────
+  const users = useMemo(() => {
+    if (workspaceType === "personal") {
+      const me = teamUsers.find((u) => u.id === socket?.id);
+      return me ? [me] : [];
+    }
+    // In session: members sharing this session
+    if (sessionId) {
+      return teamUsers.filter((u) => u.sessionId === sessionId);
+    }
+    return teamUsers.filter((u) => u.workspaceType === "session");
+  }, [workspaceType, sessionId, teamUsers, socket?.id]);
+
+  // ── Socket event listeners ────────────────────────────────────────────────
   useEffect(() => {
     if (!socket || !roomId || hasJoined.current) return;
     hasJoined.current = true;
 
+    // Join room for team presence and chat
     socket.emit("join-room", { roomId, userName });
 
-    // Receive full room state on join (includes existing lineAuthors blame map & whiteboard & viewMode)
-    socket.on("room-state", ({ code: c, language: l, users: u, lineAuthors: la, files: f, activeFile: af, whiteboard: wb, viewMode: vm }) => {
+    // Initial state on join
+    const handleRoomState = (data) => {
       isRemoteChange.current = true;
-      setCode(c);
-      setLanguageSt(l);
-      setUsers(u);
-      // la is a plain object { lineNumber: { name, color, userId } }
-      if (la) setLineAuthors(la);
-      if (f) setFiles(f);
-      if (af !== undefined) setActiveFile(af);
-      if (wb) setWhiteboardElements(wb);
-      if (vm) setViewMode(vm);
-    });
+      if (data.code !== undefined) setCode(data.code);
+      if (data.language) setLanguageSt(data.language);
+      if (data.lineAuthors) setLineAuthors(data.lineAuthors);
+      if (data.files) setFiles(data.files);
+      if (data.activeFile !== undefined) setActiveFile(data.activeFile);
+      if (data.whiteboard) setWhiteboardElements(data.whiteboard);
+      if (data.viewMode) setViewMode(data.viewMode);
+      if (data.workspaceType) setWorkspaceType(data.workspaceType);
+      if (data.workspaceId) setWorkspaceId(data.workspaceId);
+      if (data.users) setTeamUsers(data.users);
+    };
 
-    // Another user joined
+    // Full workspace replacement (on joining room, accepting session, or leaving session)
+    const handleWorkspaceState = (data) => {
+      isRemoteChange.current = true;
+      if (data.code !== undefined) setCode(data.code);
+      if (data.language) setLanguageSt(data.language);
+      setLineAuthors(data.lineAuthors || {});
+      setFiles(data.files || []);
+      setActiveFile(data.activeFile !== undefined ? data.activeFile : null);
+      setWhiteboardElements(data.whiteboard || []);
+      if (data.viewMode) setViewMode(data.viewMode);
+      setWorkspaceType(data.workspaceType || "personal");
+      setWorkspaceId(data.workspaceId || null);
+
+      // Reset cursors and transient states for fresh workspace
+      setRemoteCursors({});
+      setRemoteWhiteboardCursors({});
+      setRemoteLiveStroke(null);
+      setTypingUsers(new Set());
+    };
+
+    socket.on("room-state", handleRoomState);
+    socket.on("workspace-state", handleWorkspaceState);
+
+    // Team presence updates
+    socket.on("users-update", (allUsers) => setTeamUsers(allUsers));
+    socket.on("presence-update", (allUsers) => setTeamUsers(allUsers));
+
     socket.on("user-joined", (user) => {
-      setUsers((prev) => [...prev.filter((u) => u.id !== user.id), user]);
+      setTeamUsers((prev) => [...prev.filter((u) => u.id !== user.id), user]);
     });
 
-    // User left
     socket.on("user-left", ({ userId }) => {
-      setUsers((prev) => prev.filter((u) => u.id !== userId));
+      setTeamUsers((prev) => prev.filter((u) => u.id !== userId));
       setRemoteCursors((prev) => {
         const next = { ...prev };
         delete next[userId];
@@ -92,28 +138,54 @@ export function useCollaboration({ socket, roomId, userName }) {
       });
     });
 
-    // Authoritative user list update
-    socket.on("users-update", (u) => setUsers(u));
+    // ── Session Membership Updates ──────────────────────────────────────────
+    socket.on("session-update", ({ sessionId: sid, members: m }) => {
+      setSessionId(sid);
+      setSessionMembers(m || []);
+      setWorkspaceType(sid ? "session" : "personal");
+    });
 
-    // Remote code edit
+    // ── Collaboration Request Listeners ─────────────────────────────────────
+    socket.on("collab-request-received", (req) => {
+      setIncomingRequests((prev) => {
+        if (prev.some((r) => r.fromUserId === req.fromUserId)) return prev;
+        return [...prev, req];
+      });
+    });
+
+    socket.on("collab-request-cancelled", ({ fromUserId }) => {
+      setIncomingRequests((prev) => prev.filter((r) => r.fromUserId !== fromUserId));
+    });
+
+    socket.on("collab-request-sent", ({ toUserId }) => {
+      setOutgoingRequests((prev) => new Set([...prev, toUserId]));
+    });
+
+    socket.on("collab-declined", ({ byUserId }) => {
+      setOutgoingRequests((prev) => {
+        const next = new Set(prev);
+        next.delete(byUserId);
+        return next;
+      });
+    });
+
+    // ── Workspace Editor Scoped Listeners ───────────────────────────────────
     socket.on("code-update", ({ code: c, senderId }) => {
-      if (senderId === socket.id) return; // ignore echo
+      if (senderId === socket.id) return;
       isRemoteChange.current = true;
       setCode(c);
     });
 
-    // Language change
     socket.on("language-update", ({ language: l }) => setLanguageSt(l));
 
-    // Remote cursor position
     socket.on("cursor-update", ({ userId, cursor }) => {
       setRemoteCursors((prev) => ({ ...prev, [userId]: cursor }));
     });
 
-    // Typing indicators
     socket.on("user-typing", ({ userId }) =>
       setTypingUsers((prev) => new Set([...prev, userId]))
     );
+
     socket.on("user-stopped-typing", ({ userId }) => {
       setTypingUsers((prev) => {
         const next = new Set(prev);
@@ -122,13 +194,6 @@ export function useCollaboration({ socket, roomId, userName }) {
       });
     });
 
-    // Chat
-    socket.on("chat-message", (msg) =>
-      setChatMessages((prev) => [...prev, msg])
-    );
-
-    // ── Line authorship from a remote peer ──────────────────────────────────
-    // lines = [{ line, name, color, userId }, …]
     socket.on("line-author-update", ({ lines }) => {
       setLineAuthors((prev) => {
         const next = { ...prev };
@@ -139,7 +204,6 @@ export function useCollaboration({ socket, roomId, userName }) {
       });
     });
 
-    // ── Files uploaded to the room (by anyone) ──────────────────────────────
     socket.on("files-update", ({ files: f, activeFile: af }) => {
       setFiles(f);
       setActiveFile(af);
@@ -150,7 +214,6 @@ export function useCollaboration({ socket, roomId, userName }) {
       window.alert(message || "Rename failed.");
     });
 
-    // ── The whole room's shared buffer switched to a different file ────────
     socket.on("active-file-changed", ({ path, code: c, language: l, lineAuthors: la }) => {
       isRemoteChange.current = true;
       setActiveFile(path);
@@ -159,7 +222,12 @@ export function useCollaboration({ socket, roomId, userName }) {
       setLineAuthors(la || {});
     });
 
-    // ── Whiteboard collaborative sync ────────────────────────────────────────
+    // ── Team Chat ───────────────────────────────────────────────────────────
+    socket.on("chat-message", (msg) => {
+      setChatMessages((prev) => [...prev, msg]);
+    });
+
+    // ── Workspace Whiteboard Listeners ──────────────────────────────────────
     socket.on("whiteboard-update", ({ elements }) => {
       setWhiteboardElements(Array.isArray(elements) ? elements : []);
       setRemoteLiveStroke(null);
@@ -178,7 +246,7 @@ export function useCollaboration({ socket, roomId, userName }) {
       }));
     });
 
-    // ── Synchronized View Mode (when anyone opens whiteboard, all peers switch) ──
+    // ── Synchronized View Mode (scoped to workspace) ────────────────────────
     socket.on("view-mode-update", ({ viewMode: vm }) => {
       if (vm) {
         setViewMode(vm);
@@ -187,20 +255,27 @@ export function useCollaboration({ socket, roomId, userName }) {
     });
 
     return () => {
-      socket.off("room-state");
+      socket.off("room-state", handleRoomState);
+      socket.off("workspace-state", handleWorkspaceState);
+      socket.off("users-update");
+      socket.off("presence-update");
       socket.off("user-joined");
       socket.off("user-left");
-      socket.off("users-update");
+      socket.off("session-update");
+      socket.off("collab-request-received");
+      socket.off("collab-request-cancelled");
+      socket.off("collab-request-sent");
+      socket.off("collab-declined");
       socket.off("code-update");
       socket.off("language-update");
       socket.off("cursor-update");
       socket.off("user-typing");
       socket.off("user-stopped-typing");
-      socket.off("chat-message");
       socket.off("line-author-update");
       socket.off("files-update");
       socket.off("rename-file-error");
       socket.off("active-file-changed");
+      socket.off("chat-message");
       socket.off("whiteboard-update");
       socket.off("whiteboard-draw-step");
       socket.off("whiteboard-cursor-update");
@@ -216,48 +291,42 @@ export function useCollaboration({ socket, roomId, userName }) {
         return;
       }
       setCode(newCode);
-      socket?.emit("code-change", { roomId, code: newCode });
+      socket?.emit("code-change", { code: newCode });
 
-      // Typing indicator debounce
-      socket?.emit("typing-start", { roomId });
+      // Debounce typing indicator
+      socket?.emit("typing-start", {});
       clearTimeout(typingTimer.current);
       typingTimer.current = setTimeout(() => {
-        socket?.emit("typing-stop", { roomId });
+        socket?.emit("typing-stop", {});
       }, 1500);
     },
-    [socket, roomId]
+    [socket]
   );
 
   // ── Emit language change ─────────────────────────────────────────────────
   const handleLanguageChange = useCallback(
     (lang) => {
       setLanguageSt(lang);
-      socket?.emit("language-change", { roomId, language: lang });
+      socket?.emit("language-change", { language: lang });
     },
-    [socket, roomId]
+    [socket]
   );
 
   // ── Emit cursor move ─────────────────────────────────────────────────────
   const handleCursorChange = useCallback(
     (cursor) => {
-      socket?.emit("cursor-move", { roomId, cursor });
+      socket?.emit("cursor-move", { cursor });
     },
-    [socket, roomId]
+    [socket]
   );
 
   // ── Emit line-author update ───────────────────────────────────────────────
-  /**
-   * Called by Editor whenever the user edits lines.
-   * lines: number[]  – the 1-indexed line numbers that were changed.
-   * authorInfo: { name, color, userId }
-   */
   const emitLineAuthors = useCallback(
     (lines, authorInfo) => {
-      if (!socket || !roomId || !lines.length) return;
+      if (!socket || !lines.length) return;
 
       const payload = lines.map((line) => ({ line, ...authorInfo }));
 
-      // Update local state immediately so the author sees their own label
       setLineAuthors((prev) => {
         const next = { ...prev };
         payload.forEach(({ line, name, color, userId }) => {
@@ -266,34 +335,33 @@ export function useCollaboration({ socket, roomId, userName }) {
         return next;
       });
 
-      socket.emit("line-author-update", { roomId, lines: payload });
+      socket.emit("line-author-update", { lines: payload });
     },
-    [socket, roomId]
+    [socket]
   );
 
-  // ── Send chat message ────────────────────────────────────────────────────
+  // ── Team Chat ────────────────────────────────────────────────────────────
   const sendChatMessage = useCallback(
     (message) => {
-      socket?.emit("chat-message", { roomId, message });
+      socket?.emit("chat-message", { message });
     },
-    [socket, roomId]
+    [socket]
   );
 
-  // ── Create a new file in the shared room ─────────────────────────────────
+  // ── File Management ──────────────────────────────────────────────────────
   const createFile = useCallback(
     (fileName) => {
-      if (!socket || !roomId) return;
+      if (!socket) return;
       const name = String(fileName || "").trim() || "untitled.js";
       const normalized = name.startsWith("/") ? name.slice(1) : name;
       const safePath = normalized.includes(".") ? normalized : `${normalized}.js`;
 
       socket.emit("create-file", {
-        roomId,
         path: safePath,
         language: (() => {
           const ext = safePath.split(".").pop()?.toLowerCase();
-          if (ext === "js" || ext === "jsx" || ext === "mjs" || ext === "cjs") return "javascript";
-          if (ext === "ts" || ext === "tsx") return "typescript";
+          if (["js", "jsx", "mjs", "cjs"].includes(ext)) return "javascript";
+          if (["ts", "tsx"].includes(ext)) return "typescript";
           if (ext === "py") return "python";
           if (ext === "html") return "html";
           if (ext === "css") return "css";
@@ -304,12 +372,12 @@ export function useCollaboration({ socket, roomId, userName }) {
         code: "",
       });
     },
-    [socket, roomId]
+    [socket]
   );
 
   const renameFile = useCallback(
     (oldPath, newName) => {
-      if (!socket || !roomId) return;
+      if (!socket) return;
       const trimmed = String(newName || "").trim();
       if (!trimmed) return;
       const normalizedOld = String(oldPath || "").replace(/^\/+/, "");
@@ -319,23 +387,22 @@ export function useCollaboration({ socket, roomId, userName }) {
       const newPath = `${baseDir}${String(trimmed).replace(/^\/+/, "")}`;
       if (!newPath || newPath === normalizedOld) return;
 
-      socket.emit("rename-file", { roomId, oldPath: normalizedOld, newPath });
+      socket.emit("rename-file", { oldPath: normalizedOld, newPath });
     },
-    [socket, roomId]
+    [socket]
   );
 
   const deleteFile = useCallback(
     (path) => {
-      if (!socket || !roomId) return;
-      socket.emit("delete-file", { roomId, path: String(path || "").replace(/^\/+/, "") });
+      if (!socket) return;
+      socket.emit("delete-file", { path: String(path || "").replace(/^\/+/, "") });
     },
-    [socket, roomId]
+    [socket]
   );
 
-  // ── Upload a folder: read every included file, then hand the batch to the server ──
   const uploadFolder = useCallback(
     async (fileList) => {
-      if (!socket || !roomId || !fileList?.length) return;
+      if (!socket || !fileList?.length) return;
       setIsUploading(true);
 
       const readable = [...fileList].filter((f) => {
@@ -362,63 +429,92 @@ export function useCollaboration({ socket, roomId, userName }) {
         return;
       }
 
-      socket.emit("upload-folder", { roomId, files: results });
-      // isUploading is cleared when the server's "files-update" event arrives
+      socket.emit("upload-folder", { files: results });
     },
-    [socket, roomId]
+    [socket]
   );
 
-  // ── Switch the room's shared active file ─────────────────────────────────
   const switchFile = useCallback(
     (path) => {
-      if (!socket || !roomId || path === activeFile) return;
-      socket.emit("switch-file", { roomId, path });
+      if (!socket || path === activeFile) return;
+      socket.emit("switch-file", { path });
     },
-    [socket, roomId, activeFile]
+    [socket, activeFile]
   );
 
   // ── Whiteboard action dispatchers ─────────────────────────────────────────
   const handleWhiteboardChange = useCallback(
     (elements) => {
       setWhiteboardElements(elements);
-      socket?.emit("whiteboard-update", { roomId, elements });
+      socket?.emit("whiteboard-update", { elements });
     },
-    [socket, roomId]
+    [socket]
   );
 
   const handleWhiteboardDrawStep = useCallback(
     (stroke) => {
-      socket?.emit("whiteboard-draw-step", { roomId, stroke });
+      socket?.emit("whiteboard-draw-step", { stroke });
     },
-    [socket, roomId]
+    [socket]
   );
 
   const handleWhiteboardCursor = useCallback(
     (cursor) => {
-      socket?.emit("whiteboard-cursor", { roomId, cursor });
+      socket?.emit("whiteboard-cursor", { cursor });
     },
-    [socket, roomId]
+    [socket]
   );
 
   const handleWhiteboardClear = useCallback(() => {
     setWhiteboardElements([]);
-    socket?.emit("whiteboard-clear", { roomId });
-  }, [socket, roomId]);
+    socket?.emit("whiteboard-clear", {});
+  }, [socket]);
 
-  // ── Switch room view mode for EVERYONE in the room ───────────────────────
+  // ── Workspace View Mode ───────────────────────────────────────────────────
   const switchViewMode = useCallback(
     (newMode) => {
       setViewMode(newMode);
-      socket?.emit("view-mode-change", { roomId, viewMode: newMode });
+      socket?.emit("view-mode-change", { viewMode: newMode });
       setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
     },
-    [socket, roomId]
+    [socket]
   );
+
+  // ── Collaboration session controls ────────────────────────────────────────
+  const sendCollabRequest = useCallback(
+    (toUserId) => {
+      if (!socket || !toUserId) return;
+      setOutgoingRequests((prev) => new Set([...prev, toUserId]));
+      socket.emit("collab-request", { toUserId });
+    },
+    [socket]
+  );
+
+  const respondToRequest = useCallback(
+    (fromUserId, accept) => {
+      if (!socket || !fromUserId) return;
+      setIncomingRequests((prev) => prev.filter((r) => r.fromUserId !== fromUserId));
+      socket.emit("collab-respond", { fromUserId, accept });
+    },
+    [socket]
+  );
+
+  const leaveSession = useCallback(() => {
+    if (!socket) return;
+    socket.emit("leave-session", {});
+  }, [socket]);
 
   return {
     code,
     language,
     users,
+    teamUsers,
+    workspaceType,
+    workspaceId,
+    sessionId,
+    sessionMembers,
+    incomingRequests,
+    outgoingRequests,
     remoteCursors,
     typingUsers,
     chatMessages,
@@ -446,5 +542,8 @@ export function useCollaboration({ socket, roomId, userName }) {
     handleWhiteboardDrawStep,
     handleWhiteboardCursor,
     handleWhiteboardClear,
+    sendCollabRequest,
+    respondToRequest,
+    leaveSession,
   };
 }
