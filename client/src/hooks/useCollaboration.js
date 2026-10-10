@@ -51,6 +51,7 @@ export function useCollaboration({ socket, roomId, userName }) {
   const isRemoteChange = useRef(false);
   const typingTimer    = useRef(null);
   const hasJoined      = useRef(false);
+  const prevUserStatuses = useRef(new Map());
 
   // ── Active workspace users (for Monaco cursor/blame rendering) ───────────
   const users = useMemo(() => {
@@ -85,7 +86,12 @@ export function useCollaboration({ socket, roomId, userName }) {
       if (data.viewMode) setViewMode(data.viewMode);
       if (data.workspaceType) setWorkspaceType(data.workspaceType);
       if (data.workspaceId) setWorkspaceId(data.workspaceId);
-      if (data.users) setTeamUsers(data.users);
+      if (data.users) {
+        setTeamUsers(data.users);
+        data.users.forEach((u) => {
+          prevUserStatuses.current.set(u.id, `${u.workspaceType || "personal"}:${u.sessionId || ""}`);
+        });
+      }
     };
 
     // Full workspace replacement (on joining room, accepting session, or leaving session)
@@ -112,8 +118,31 @@ export function useCollaboration({ socket, roomId, userName }) {
     socket.on("workspace-state", handleWorkspaceState);
 
     // Team presence updates
-    socket.on("users-update", (allUsers) => setTeamUsers(allUsers));
-    socket.on("presence-update", (allUsers) => setTeamUsers(allUsers));
+    const handlePresenceUpdate = (allUsers) => {
+      setTeamUsers(allUsers);
+      setOutgoingRequests((prev) => {
+        let changed = false;
+        const next = new Set(prev);
+        allUsers.forEach((u) => {
+          const prevStatus = prevUserStatuses.current.get(u.id);
+          const currentStatus = `${u.workspaceType || "personal"}:${u.sessionId || ""}`;
+          // If user's session status changed or user is in my session, clear outgoing request
+          if (
+            (prevStatus !== undefined && prevStatus !== currentStatus) ||
+            (sessionId && u.sessionId === sessionId)
+          ) {
+            if (next.delete(u.id)) {
+              changed = true;
+            }
+          }
+          prevUserStatuses.current.set(u.id, currentStatus);
+        });
+        return changed ? next : prev;
+      });
+    };
+
+    socket.on("users-update", handlePresenceUpdate);
+    socket.on("presence-update", handlePresenceUpdate);
 
     socket.on("user-joined", (user) => {
       setTeamUsers((prev) => [...prev.filter((u) => u.id !== user.id), user]);
@@ -121,6 +150,12 @@ export function useCollaboration({ socket, roomId, userName }) {
 
     socket.on("user-left", ({ userId }) => {
       setTeamUsers((prev) => prev.filter((u) => u.id !== userId));
+      setOutgoingRequests((prev) => {
+        if (!prev.has(userId)) return prev;
+        const next = new Set(prev);
+        next.delete(userId);
+        return next;
+      });
       setRemoteCursors((prev) => {
         const next = { ...prev };
         delete next[userId];
@@ -143,12 +178,21 @@ export function useCollaboration({ socket, roomId, userName }) {
       setSessionId(sid);
       setSessionMembers(m || []);
       setWorkspaceType(sid ? "session" : "personal");
+      if (m && m.length > 0) {
+        setOutgoingRequests((prev) => {
+          if (!prev.size) return prev;
+          const next = new Set(prev);
+          m.forEach((mem) => next.delete(mem.id));
+          return next.size === prev.size ? prev : next;
+        });
+      }
     });
 
     socket.on("session-ended", () => {
       setSessionId(null);
       setSessionMembers([]);
       setWorkspaceType("personal");
+      setOutgoingRequests(new Set());
     });
 
     // ── Collaboration Request Listeners ─────────────────────────────────────
@@ -165,6 +209,14 @@ export function useCollaboration({ socket, roomId, userName }) {
 
     socket.on("collab-request-sent", ({ toUserId }) => {
       setOutgoingRequests((prev) => new Set([...prev, toUserId]));
+    });
+
+    socket.on("collab-request-resolved", ({ toUserId }) => {
+      setOutgoingRequests((prev) => {
+        const next = new Set(prev);
+        next.delete(toUserId);
+        return next;
+      });
     });
 
     socket.on("collab-declined", ({ byUserId }) => {
@@ -272,6 +324,7 @@ export function useCollaboration({ socket, roomId, userName }) {
       socket.off("collab-request-received");
       socket.off("collab-request-cancelled");
       socket.off("collab-request-sent");
+      socket.off("collab-request-resolved");
       socket.off("collab-declined");
       socket.off("code-update");
       socket.off("language-update");
@@ -497,6 +550,19 @@ export function useCollaboration({ socket, roomId, userName }) {
     [socket]
   );
 
+  const cancelCollabRequest = useCallback(
+    (toUserId) => {
+      if (!socket || !toUserId) return;
+      setOutgoingRequests((prev) => {
+        const next = new Set(prev);
+        next.delete(toUserId);
+        return next;
+      });
+      socket.emit("collab-request-cancel", { toUserId });
+    },
+    [socket]
+  );
+
   const respondToRequest = useCallback(
     (fromUserId, accept) => {
       if (!socket || !fromUserId) return;
@@ -550,6 +616,7 @@ export function useCollaboration({ socket, roomId, userName }) {
     handleWhiteboardCursor,
     handleWhiteboardClear,
     sendCollabRequest,
+    cancelCollabRequest,
     respondToRequest,
     leaveSession,
   };

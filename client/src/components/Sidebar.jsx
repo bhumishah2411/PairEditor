@@ -4,7 +4,7 @@
  *   - Team presence list below with personal/session indicators and collaborate/invite buttons
  */
 import { motion, AnimatePresence } from "framer-motion";
-import { UserPlus, Check, Users, LogOut } from "lucide-react";
+import { UserPlus, Check, Users, LogOut, X } from "lucide-react";
 import FileExplorer from "./FileExplorer";
 
 export default function Sidebar({
@@ -15,6 +15,7 @@ export default function Sidebar({
   sessionId = null,
   outgoingRequests = new Set(),
   onSendCollabRequest,
+  onCancelCollabRequest,
   onOpenLeaveModal,
   files,
   activeFile,
@@ -135,9 +136,20 @@ export default function Sidebar({
                         <span>synced</span>
                       </span>
                     ) : isPending ? (
-                      <span className="font-mono text-[10px] text-paper-faint bg-panel-raised px-1.5 py-0.5 rounded border border-line">
-                        sent…
-                      </span>
+                      <div className="flex items-center gap-1">
+                        <span className="font-mono text-[10px] text-paper-faint bg-panel-raised px-1.5 py-0.5 rounded border border-line">
+                          sent…
+                        </span>
+                        {onCancelCollabRequest && (
+                          <button
+                            onClick={() => onCancelCollabRequest(user.id)}
+                            className="w-4 h-4 flex items-center justify-center rounded hover:bg-danger/20 text-paper-faint hover:text-danger transition-colors"
+                            title="Cancel collaboration request"
+                          >
+                            <X size={10} />
+                          </button>
+                        )}
+                      </div>
                     ) : (
                       <button
                         onClick={() => onSendCollabRequest(user.id)}

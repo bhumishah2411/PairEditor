@@ -81,6 +81,7 @@ export default function App() {
     handleWhiteboardCursor,
     handleWhiteboardClear,
     sendCollabRequest,
+    cancelCollabRequest,
     respondToRequest,
     leaveSession,
   } = useCollaboration({
@@ -146,7 +147,9 @@ export default function App() {
       });
     };
 
-    const onCollabDeclined = ({ byName, reason }) => {
+    let lastDeclinedUserId = null;
+    const onCollabDeclined = ({ byUserId, byName, reason }) => {
+      lastDeclinedUserId = byUserId;
       toast.error(`${byName || "Peer"} declined your request${reason ? ` (${reason})` : ""}`, {
         style: toastStyle,
       });
@@ -159,6 +162,23 @@ export default function App() {
       });
     };
 
+    const onCollabRequestResolved = ({ toUserId, status }) => {
+      if (status === "expired") {
+        toast("Collaboration request expired (no response)", {
+          icon: "⏱️",
+          style: toastStyle,
+        });
+      } else if (status === "declined") {
+        if (lastDeclinedUserId !== toUserId) {
+          const user = teamUsers.find((u) => u.id === toUserId);
+          toast.error(`${user?.name || "Peer"} declined your request`, {
+            style: toastStyle,
+          });
+        }
+        lastDeclinedUserId = null;
+      }
+    };
+
     socket.on("user-joined", joined);
     socket.on("user-left", left);
     socket.on("session-member-joined", onSessionMemberJoined);
@@ -166,6 +186,7 @@ export default function App() {
     socket.on("session-ended", onSessionEnded);
     socket.on("collab-declined", onCollabDeclined);
     socket.on("collab-request-sent", onCollabRequestSent);
+    socket.on("collab-request-resolved", onCollabRequestResolved);
 
     return () => {
       socket.off("user-joined", joined);
@@ -175,6 +196,7 @@ export default function App() {
       socket.off("session-ended", onSessionEnded);
       socket.off("collab-declined", onCollabDeclined);
       socket.off("collab-request-sent", onCollabRequestSent);
+      socket.off("collab-request-resolved", onCollabRequestResolved);
     };
   }, [socket, session, teamUsers]);
 
@@ -297,6 +319,7 @@ export default function App() {
                   sessionId={sessionId}
                   outgoingRequests={outgoingRequests}
                   onSendCollabRequest={sendCollabRequest}
+                  onCancelCollabRequest={cancelCollabRequest}
                   onOpenLeaveModal={() => setShowLeaveModal(true)}
                   files={files}
                   activeFile={activeFile}

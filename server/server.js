@@ -60,9 +60,42 @@ const rooms = new Map();
 const workspaces = new Map();
 
 /**
- * pendingCollabRequests: Map<`${fromUserId}->${toUserId}`, { fromUserId, toUserId, timestamp }>
+ * pendingCollabRequests: Map<`${fromUserId}->${toUserId}`, { fromUserId, toUserId, timestamp, timer }>
  */
 const pendingCollabRequests = new Map();
+
+/**
+ * Resolves and clears a pending collab request.
+ * Clears timeout, deletes from Map, and notifies the sender with `collab-request-resolved`.
+ */
+function resolvePendingRequest(reqKey, status) {
+  const req = pendingCollabRequests.get(reqKey);
+  if (!req) return;
+  if (req.timer) clearTimeout(req.timer);
+  pendingCollabRequests.delete(reqKey);
+
+  // Notify sender
+  io.to(req.fromUserId).emit("collab-request-resolved", {
+    fromUserId: req.fromUserId,
+    toUserId: req.toUserId,
+    status, // "accepted" | "declined" | "cancelled" | "expired"
+  });
+}
+
+/** Clear all pending requests involving a user (as sender or target) */
+function clearPendingRequestsForUser(userId, status = "cancelled") {
+  for (const [key, req] of pendingCollabRequests.entries()) {
+    if (req.fromUserId === userId) {
+      // User was sender: cancel popup on target
+      io.to(req.toUserId).emit("collab-request-cancelled", { fromUserId: userId });
+      resolvePendingRequest(key, status);
+    } else if (req.toUserId === userId) {
+      // User was target: cancel popup on user, resolve for sender
+      io.to(req.toUserId).emit("collab-request-cancelled", { fromUserId: req.fromUserId });
+      resolvePendingRequest(key, status);
+    }
+  }
+}
 
 /** Predefined user colours so each visitor gets a unique accent */
 const USER_COLORS = [
@@ -242,6 +275,9 @@ function removeSocketFromSession(socket, sessionWs, room) {
   sessionWs.members.delete(socket.id);
   socket.leave(`ws:${sessionWs.id}`);
 
+  // Clear any pending requests involving the leaving user
+  clearPendingRequestsForUser(socket.id, "cancelled");
+
   const user = room?.users.get(socket.id);
   socket.to(`ws:${sessionWs.id}`).emit("session-member-left", {
     userId: socket.id,
@@ -253,6 +289,9 @@ function removeSocketFromSession(socket, sessionWs, room) {
     const remainingSocketId = [...sessionWs.members][0];
     const remainingSocket = io.sockets.sockets.get(remainingSocketId);
     const remainingUser = room?.users.get(remainingSocketId);
+
+    // Clear any pending requests involving the remaining user
+    clearPendingRequestsForUser(remainingSocketId, "cancelled");
 
     const remainingPersonalWsId = `personal:${remainingSocketId}`;
     const remainingPersonalWs = cloneWorkspaceForPersonal(sessionWs, remainingPersonalWsId);
@@ -460,12 +499,21 @@ io.on("connection", (socket) => {
     const reqKey = `${socket.id}->${toUserId}`;
     if (pendingCollabRequests.has(reqKey)) return;
 
+    // Set 60-second expiration timer
+    const timer = setTimeout(() => {
+      if (pendingCollabRequests.has(reqKey)) {
+        io.to(toUserId).emit("collab-request-cancelled", { fromUserId: socket.id });
+        resolvePendingRequest(reqKey, "expired");
+      }
+    }, 60 * 1000);
+
     pendingCollabRequests.set(reqKey, {
       fromUserId: socket.id,
       toUserId,
       fromName: senderUser.name,
       fromColor: senderUser.color,
       timestamp: Date.now(),
+      timer,
     });
 
     // Send request popup to target user
@@ -478,20 +526,34 @@ io.on("connection", (socket) => {
     socket.emit("collab-request-sent", { toUserId });
   });
 
+  socket.on("collab-request-cancel", ({ toUserId }) => {
+    if (!toUserId) return;
+    const reqKey = `${socket.id}->${toUserId}`;
+    if (pendingCollabRequests.has(reqKey)) {
+      io.to(toUserId).emit("collab-request-cancelled", { fromUserId: socket.id });
+      resolvePendingRequest(reqKey, "cancelled");
+    }
+  });
+
   socket.on("collab-respond", ({ fromUserId, accept }) => {
     const roomId = socket.roomId;
     if (!roomId || !fromUserId) return;
 
     const reqKey = `${fromUserId}->${socket.id}`;
     if (!pendingCollabRequests.has(reqKey)) return;
-    pendingCollabRequests.delete(reqKey);
 
     const room = rooms.get(roomId);
-    if (!room) return;
+    if (!room) {
+      resolvePendingRequest(reqKey, "cancelled");
+      return;
+    }
 
     const requesterUser = room.users.get(fromUserId);
     const targetUser = room.users.get(socket.id);
-    if (!requesterUser || !targetUser) return;
+    if (!requesterUser || !targetUser) {
+      resolvePendingRequest(reqKey, "cancelled");
+      return;
+    }
 
     if (!accept) {
       // Notify requester that collaboration was declined
@@ -499,8 +561,15 @@ io.on("connection", (socket) => {
         byUserId: socket.id,
         byName: targetUser.name,
       });
+      resolvePendingRequest(reqKey, "declined");
       return;
     }
+
+    // Accepted: resolve this request
+    resolvePendingRequest(reqKey, "accepted");
+    // Clear any other pending requests involving either user
+    clearPendingRequestsForUser(fromUserId, "cancelled");
+    clearPendingRequestsForUser(socket.id, "cancelled");
 
     const requesterSocket = io.sockets.sockets.get(fromUserId);
     if (!requesterSocket) return;
@@ -979,20 +1048,8 @@ io.on("connection", (socket) => {
     // Clean up personal workspace
     workspaces.delete(`personal:${socket.id}`);
 
-    // Clean up pending requests involving this socket
-    for (const [key, req] of pendingCollabRequests.entries()) {
-      if (req.fromUserId === socket.id) {
-        pendingCollabRequests.delete(key);
-        io.to(req.toUserId).emit("collab-request-cancelled", { fromUserId: socket.id });
-      } else if (req.toUserId === socket.id) {
-        pendingCollabRequests.delete(key);
-        io.to(req.fromUserId).emit("collab-declined", {
-          byUserId: socket.id,
-          byName: user?.name || "Peer",
-          reason: "User disconnected",
-        });
-      }
-    }
+    // Clean up all pending requests involving this socket
+    clearPendingRequestsForUser(socket.id, "cancelled");
 
     // Notify room of departure
     socket.to(roomId).emit("user-left", { userId: socket.id });
