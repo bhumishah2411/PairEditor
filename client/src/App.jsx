@@ -3,7 +3,7 @@
  *
  * State machine:
  *  "landing"  → user fills in name + room ID
- *  "editor"   → full workspace is shown
+ *  "editor"   → full workspace is shown (personal or collaborative session)
  *
  * URL param ?room=<id> pre-fills the room ID so sharing a link works.
  */
@@ -16,13 +16,14 @@ import { useSocket }        from "./hooks/useSocket";
 import { useCollaboration } from "./hooks/useCollaboration";
 import { runCode }          from "./utils/codeRunner";
 
-import RoomJoin    from "./components/RoomJoin";
-import Toolbar     from "./components/Toolbar";
-import Sidebar     from "./components/Sidebar";
-import Editor      from "./components/Editor";
-import Whiteboard  from "./components/Whiteboard";
-import ChatPanel   from "./components/ChatPanel";
-import OutputPanel from "./components/OutputPanel";
+import RoomJoin       from "./components/RoomJoin";
+import Toolbar        from "./components/Toolbar";
+import Sidebar        from "./components/Sidebar";
+import Editor         from "./components/Editor";
+import Whiteboard     from "./components/Whiteboard";
+import ChatPanel      from "./components/ChatPanel";
+import OutputPanel    from "./components/OutputPanel";
+import CollabRequests from "./components/CollabRequests";
 
 export default function App() {
   // ── Theme ────────────────────────────────────────────────────────────────
@@ -40,11 +41,18 @@ export default function App() {
   // ── Socket ───────────────────────────────────────────────────────────────
   const { socket, connected } = useSocket();
 
-  // ── Collaboration ────────────────────────────────────────────────────────
+  // ── Collaboration & Workspace ─────────────────────────────────────────────
   const {
     code,
     language,
     users,
+    teamUsers,
+    workspaceType,
+    workspaceId,
+    sessionId,
+    sessionMembers,
+    incomingRequests,
+    outgoingRequests,
     remoteCursors,
     typingUsers,
     chatMessages,
@@ -71,6 +79,9 @@ export default function App() {
     handleWhiteboardDrawStep,
     handleWhiteboardCursor,
     handleWhiteboardClear,
+    sendCollabRequest,
+    respondToRequest,
+    leaveSession,
   } = useCollaboration({
     socket,
     roomId:   session?.roomId,
@@ -83,28 +94,69 @@ export default function App() {
   const [output,     setOutput]     = useState(null);
   const [isRunning,  setIsRunning]  = useState(false);
 
-  // Show toast on user join/leave
+  // ── Toasts for team room & session events ─────────────────────────────────
   useEffect(() => {
-    if (!session) return;
+    if (!session || !socket) return;
+
     const joined = (user) => {
-      if (user.id !== socket?.id) {
+      if (user.id !== socket.id) {
         toast.success(`${user.name} joined the room`, {
           icon: "👋",
           style: toastStyle,
         });
       }
     };
+
     const left = ({ userId }) => {
-      const user = users.find((u) => u.id === userId);
+      const user = teamUsers.find((u) => u.id === userId);
       if (user) toast(`${user.name} left`, { icon: "👋", style: toastStyle });
     };
-    socket?.on("user-joined", joined);
-    socket?.on("user-left", left);
-    return () => {
-      socket?.off("user-joined", joined);
-      socket?.off("user-left", left);
+
+    const onSessionMemberJoined = ({ member }) => {
+      if (member.id !== socket.id) {
+        toast.success(`${member.name} joined your session!`, {
+          icon: "🤝",
+          style: toastStyle,
+        });
+      }
     };
-  }, [socket, session, users]);
+
+    const onSessionMemberLeft = ({ userName }) => {
+      toast(`${userName || "A member"} left the session`, {
+        icon: "👋",
+        style: toastStyle,
+      });
+    };
+
+    const onCollabDeclined = ({ byName, reason }) => {
+      toast.error(`${byName || "Peer"} declined your request${reason ? ` (${reason})` : ""}`, {
+        style: toastStyle,
+      });
+    };
+
+    const onCollabRequestSent = () => {
+      toast.success("Collaboration request sent", {
+        icon: "📨",
+        style: toastStyle,
+      });
+    };
+
+    socket.on("user-joined", joined);
+    socket.on("user-left", left);
+    socket.on("session-member-joined", onSessionMemberJoined);
+    socket.on("session-member-left", onSessionMemberLeft);
+    socket.on("collab-declined", onCollabDeclined);
+    socket.on("collab-request-sent", onCollabRequestSent);
+
+    return () => {
+      socket.off("user-joined", joined);
+      socket.off("user-left", left);
+      socket.off("session-member-joined", onSessionMemberJoined);
+      socket.off("session-member-left", onSessionMemberLeft);
+      socket.off("collab-declined", onCollabDeclined);
+      socket.off("collab-request-sent", onCollabRequestSent);
+    };
+  }, [socket, session, teamUsers]);
 
   // ── Run code ──────────────────────────────────────────────────────────────
   const handleRun = async () => {
@@ -125,39 +177,34 @@ export default function App() {
   // ── Join handler ──────────────────────────────────────────────────────────
   const handleJoin = ({ roomId, userName }) => {
     setSession({ roomId, userName });
-    // Update URL without reload so sharing works
     window.history.replaceState({}, "", `?room=${roomId}`);
   };
 
-  const currentUser = users.find((u) => u.id === socket?.id);
+  const currentUser =
+    teamUsers.find((u) => u.id === socket?.id) ||
+    users.find((u) => u.id === socket?.id);
 
   /**
    * Stable ref always holding the local user's author info.
-   * Updated whenever the users list arrives from the server.
-   * Using a ref (not state) so handleLinesEdited always has fresh data
-   * without needing to be re-created on every render.
    */
   const localAuthorRef = useRef(null);
   useEffect(() => {
-    const me = users.find((u) => u.id === socket?.id);
+    const me = teamUsers.find((u) => u.id === socket?.id);
     if (me) {
       localAuthorRef.current = { name: me.name, color: me.color, userId: me.id };
     } else if (session) {
-      // Fallback before server echoes the user list: use session name + accent colour.
       localAuthorRef.current = {
         name:   session.userName,
         color:  "#6366f1",
         userId: socket?.id || "local",
       };
     }
-  }, [users, socket, session]);
+  }, [teamUsers, socket, session]);
 
   /**
    * Called by Editor when the local user touches specific line numbers.
-   * Packages the author info and relays it via the socket.
    */
   const handleLinesEdited = (changedLines) => {
-    // Initialise fallback immediately if ref isn't set yet
     if (!localAuthorRef.current && session) {
       localAuthorRef.current = {
         name:   session.userName,
@@ -169,11 +216,17 @@ export default function App() {
     emitLineAuthors(changedLines, localAuthorRef.current);
   };
 
-
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <>
       <Toaster position="top-right" />
+
+      {/* Floating incoming collaboration request popups */}
+      <CollabRequests
+        requests={incomingRequests}
+        onRespond={respondToRequest}
+      />
+
       <div className={`h-screen flex flex-col overflow-hidden ${isDark ? "dark" : "light"}`}>
         <AnimatePresence mode="wait">
           {!session ? (
@@ -187,6 +240,10 @@ export default function App() {
               {/* ── Top toolbar ── */}
               <Toolbar
                 roomId={session.roomId}
+                workspaceType={workspaceType}
+                workspaceId={workspaceId}
+                sessionMembers={sessionMembers}
+                onLeaveSession={leaveSession}
                 language={language}
                 connected={connected}
                 isDark={isDark}
@@ -203,11 +260,15 @@ export default function App() {
 
               {/* ── Main area ── */}
               <div className="flex flex-1 min-h-0">
-                {/* Collaborator sidebar */}
+                {/* Team members & files sidebar */}
                 <Sidebar
-                  users={users}
+                  teamUsers={teamUsers}
                   typingUsers={typingUsers}
                   currentUserId={socket?.id}
+                  workspaceType={workspaceType}
+                  sessionId={sessionId}
+                  outgoingRequests={outgoingRequests}
+                  onSendCollabRequest={sendCollabRequest}
                   files={files}
                   activeFile={activeFile}
                   isUploading={isUploading}

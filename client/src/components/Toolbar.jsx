@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   Play, Copy, Check, Sun, Moon, ChevronDown, Loader2, Download,
-  Code2, Columns, Presentation,
+  Code2, Columns, Presentation, Lock, Users, LogOut,
 } from "lucide-react";
 import { LANGUAGES } from "../utils/constants";
 import ConnectionStatus from "./ConnectionStatus";
@@ -11,6 +11,10 @@ const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3001";
 
 export default function Toolbar({
   roomId,
+  workspaceType = "personal",
+  workspaceId,
+  sessionMembers = [],
+  onLeaveSession,
   language,
   connected,
   isDark,
@@ -24,9 +28,9 @@ export default function Toolbar({
   onRun,
   isRunning,
 }) {
-  const [copied, setCopied]       = useState(false);
-  const [langOpen, setLangOpen]   = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [copied, setCopied]             = useState(false);
+  const [langOpen, setLangOpen]         = useState(false);
+  const [downloading, setDownloading]   = useState(false);
 
   const copyRoomLink = () => {
     const link = `${window.location.origin}?room=${roomId}`;
@@ -41,7 +45,11 @@ export default function Toolbar({
     if (downloading) return;
     setDownloading(true);
     try {
-      const res = await fetch(`${SERVER_URL}/api/room/${roomId}/download`);
+      const downloadUrl = workspaceId
+        ? `${SERVER_URL}/api/room/${roomId}/download?workspaceId=${encodeURIComponent(workspaceId)}`
+        : `${SERVER_URL}/api/room/${roomId}/download`;
+
+      const res = await fetch(downloadUrl);
       if (!res.ok) throw new Error("download failed");
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
@@ -53,7 +61,7 @@ export default function Toolbar({
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch {
-      // Silently no-op — button stays enabled so the user can retry
+      // Silently no-op
     } finally {
       setDownloading(false);
     }
@@ -61,7 +69,7 @@ export default function Toolbar({
 
   return (
     <div className="h-12 flex items-center justify-between px-4 border-b border-line bg-panel shrink-0 relative z-20">
-      {/* Left – wordmark + room breadcrumb */}
+      {/* Left – wordmark + room breadcrumb + workspace status */}
       <div className="flex items-center gap-3 min-w-0">
         <span className="font-mono text-sm text-paper font-semibold hidden sm:flex items-center shrink-0">
           pair<span className="text-signal">editor</span>
@@ -74,10 +82,49 @@ export default function Toolbar({
             {roomId}
           </span>
         </div>
+
+        {/* Workspace mode badge */}
+        <div className="hidden md:flex items-center gap-2">
+          <div className="h-4 w-px bg-line" />
+          {workspaceType === "session" ? (
+            <div className="flex items-center gap-2">
+              <div
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-signal/10 border border-signal/30 text-signal font-mono text-xs"
+                title={sessionMembers.length > 0 ? `Session with: ${sessionMembers.map((m) => m.name).join(", ")}` : "Shared session"}
+              >
+                <Users size={12} />
+                <span className="font-semibold">session</span>
+                {sessionMembers.length > 0 && (
+                  <span className="text-paper-muted hidden lg:inline max-w-[140px] truncate">
+                    ({sessionMembers.map((m) => m.name).join(", ")})
+                  </span>
+                )}
+              </div>
+              <button
+                id="btn-leave-session"
+                onClick={onLeaveSession}
+                className="flex items-center gap-1 px-2.5 py-1 rounded bg-danger/10 border border-danger/30 text-danger hover:bg-danger/20 font-mono text-xs font-semibold transition-colors"
+                title="Leave session and return to your private workspace"
+              >
+                <LogOut size={12} />
+                <span>leave</span>
+              </button>
+            </div>
+          ) : (
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-panel-raised border border-line text-paper-muted font-mono text-xs"
+              title="Private workspace: your code and whiteboard are private until you collaborate."
+            >
+              <Lock size={12} className="text-paper-faint" />
+              <span>private</span>
+            </div>
+          )}
+        </div>
+
         {activeFile && (
           <>
-            <div className="h-4 w-px bg-line hidden md:block" />
-            <span className="hidden md:inline font-mono text-xs text-signal truncate max-w-[220px]" title={activeFile}>
+            <div className="h-4 w-px bg-line hidden lg:block" />
+            <span className="hidden lg:inline font-mono text-xs text-signal truncate max-w-[180px]" title={activeFile}>
               {activeFile}
             </span>
           </>
