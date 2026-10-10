@@ -1,16 +1,22 @@
-# React + Vite
+# PairEditor Client
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Real-time collaborative code editor and whiteboard client built with React, Vite, Monaco Editor, and Tailwind CSS.
 
-Currently, two official plugins are available:
+## Private Workspaces and Collaboration Sessions
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+PairEditor enables optional, on-demand collaboration within team rooms:
 
-## React Compiler
+- **Team Room Presence & Chat**: Joining a room connects you to the team member list and team-wide chat.
+- **Private Workspaces by Default**: Every member starts in their own private workspace (`personal:<socketId>`). Your code, file explorer, whiteboard, and view mode remain private until you choose to collaborate.
+- **Collaboration Invitations**: Any member can send a collaboration request to another online peer. The recipient receives an animated Accept/Decline prompt.
+- **Shared Session Workspaces**: Once accepted, users transition into a unified session workspace (`session:<sessionId>`), syncing the editor buffer, file tree, line authorship blame, and whiteboard in real time.
+- **Multi-Member Sessions**: Additional members can be invited to an active session with no member count limit. Solo users continue working undisturbed.
+- **Seamless Leave & Return**: Leaving a session returns you to your private workspace with your private code and files intact. Empty sessions are automatically cleaned up.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+---
 
-## Expanding the ESLint configuration
+### Scripts
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- `npm run dev`: Start Vite development server
+- `npm run build`: Build for production
+- `npm run preview`: Preview production build
