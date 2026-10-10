@@ -1,11 +1,8 @@
-/**
- * Toolbar – top status bar of the editor workspace.
- * Contains: room info, language selector, run button, theme toggle, copy link.
- */
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   Play, Copy, Check, Sun, Moon, ChevronDown, Loader2, Download,
+  Code2, Columns, Presentation,
 } from "lucide-react";
 import { LANGUAGES } from "../utils/constants";
 import ConnectionStatus from "./ConnectionStatus";
@@ -19,6 +16,9 @@ export default function Toolbar({
   isDark,
   activeFile,
   hasFiles,
+  viewMode = "code",
+  onViewModeChange,
+  whiteboardElementsCount = 0,
   onToggleTheme,
   onLanguageChange,
   onRun,
@@ -84,41 +84,90 @@ export default function Toolbar({
         )}
       </div>
 
-      {/* Centre – language picker */}
-      <div className="relative">
-        <button
-          id="btn-language-picker"
-          onClick={() => setLangOpen((p) => !p)}
-          className="flex items-center gap-2 px-3 py-1.5 rounded bg-panel-raised border border-line text-sm text-paper hover:border-signal/30 transition-colors"
-        >
-          <span className="font-mono text-xs">{currentLang.label}</span>
-          <ChevronDown size={13} className={`transition-transform text-paper-faint ${langOpen ? "rotate-180" : ""}`} />
-        </button>
-
-        {langOpen && (
-          <motion.div
-            initial={{ opacity: 0, y: -6 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="absolute top-full mt-1 left-0 w-44 panel-glass rounded-lg shadow-2xl overflow-hidden z-50"
-            onMouseLeave={() => setLangOpen(false)}
+      {/* Centre – View Mode Toggle & Language picker */}
+      <div className="flex items-center gap-3">
+        {/* View Mode Segmented Switch: Code | Split | Whiteboard */}
+        <div className="flex items-center bg-panel-sunken p-0.5 rounded-lg border border-line shadow-inner">
+          <button
+            id="btn-mode-code"
+            onClick={() => onViewModeChange?.("code")}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium transition-all ${
+              viewMode === "code"
+                ? "bg-signal text-canvas shadow-sm font-semibold"
+                : "text-paper-muted hover:text-paper hover:bg-panel-raised/50"
+            }`}
+            title="Code Editor"
           >
-            <div className="max-h-64 overflow-y-auto py-1">
-              {LANGUAGES.map((l) => (
-                <button
-                  key={l.value}
-                  onClick={() => { onLanguageChange(l.value); setLangOpen(false); }}
-                  className={`w-full text-left px-4 py-2 font-mono text-xs transition-colors ${
-                    l.value === language
-                      ? "text-signal bg-signal/10"
-                      : "text-paper-muted hover:bg-panel-raised hover:text-paper"
-                  }`}
-                >
-                  {l.label}
-                </button>
-              ))}
-            </div>
-          </motion.div>
-        )}
+            <Code2 size={13} />
+            <span className="hidden md:inline">code</span>
+          </button>
+          <button
+            id="btn-mode-split"
+            onClick={() => onViewModeChange?.("split")}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium transition-all ${
+              viewMode === "split"
+                ? "bg-signal text-canvas shadow-sm font-semibold"
+                : "text-paper-muted hover:text-paper hover:bg-panel-raised/50"
+            }`}
+            title="Split View (Code & Whiteboard side-by-side)"
+          >
+            <Columns size={13} />
+            <span className="hidden md:inline">split</span>
+          </button>
+          <button
+            id="btn-mode-whiteboard"
+            onClick={() => onViewModeChange?.("whiteboard")}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium transition-all relative ${
+              viewMode === "whiteboard"
+                ? "bg-signal text-canvas shadow-sm font-semibold"
+                : "text-paper-muted hover:text-paper hover:bg-panel-raised/50"
+            }`}
+            title="Whiteboard Diagram Canvas"
+          >
+            <Presentation size={13} />
+            <span className="hidden md:inline">whiteboard</span>
+            {whiteboardElementsCount > 0 && viewMode !== "whiteboard" && (
+              <span className="w-1.5 h-1.5 rounded-full bg-signal inline-block" />
+            )}
+          </button>
+        </div>
+
+        {/* Language picker */}
+        <div className="relative">
+          <button
+            id="btn-language-picker"
+            onClick={() => setLangOpen((p) => !p)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded bg-panel-raised border border-line text-sm text-paper hover:border-signal/30 transition-colors"
+          >
+            <span className="font-mono text-xs">{currentLang.label}</span>
+            <ChevronDown size={13} className={`transition-transform text-paper-faint ${langOpen ? "rotate-180" : ""}`} />
+          </button>
+
+          {langOpen && (
+            <motion.div
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="absolute top-full mt-1 left-0 w-44 panel-glass rounded-lg shadow-2xl overflow-hidden z-50"
+              onMouseLeave={() => setLangOpen(false)}
+            >
+              <div className="max-h-64 overflow-y-auto py-1">
+                {LANGUAGES.map((l) => (
+                  <button
+                    key={l.value}
+                    onClick={() => { onLanguageChange(l.value); setLangOpen(false); }}
+                    className={`w-full text-left px-4 py-2 font-mono text-xs transition-colors ${
+                      l.value === language
+                        ? "text-signal bg-signal/10"
+                        : "text-paper-muted hover:bg-panel-raised hover:text-paper"
+                    }`}
+                  >
+                    {l.label}
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </div>
       </div>
 
       {/* Right – actions */}

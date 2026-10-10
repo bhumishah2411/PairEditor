@@ -20,6 +20,7 @@ import RoomJoin    from "./components/RoomJoin";
 import Toolbar     from "./components/Toolbar";
 import Sidebar     from "./components/Sidebar";
 import Editor      from "./components/Editor";
+import Whiteboard  from "./components/Whiteboard";
 import ChatPanel   from "./components/ChatPanel";
 import OutputPanel from "./components/OutputPanel";
 
@@ -51,6 +52,11 @@ export default function App() {
     files,
     activeFile,
     isUploading,
+    viewMode,
+    switchViewMode,
+    whiteboardElements,
+    remoteWhiteboardCursors,
+    remoteLiveStroke,
     handleCodeChange,
     handleLanguageChange,
     handleCursorChange,
@@ -61,6 +67,10 @@ export default function App() {
     renameFile,
     deleteFile,
     switchFile,
+    handleWhiteboardChange,
+    handleWhiteboardDrawStep,
+    handleWhiteboardCursor,
+    handleWhiteboardClear,
   } = useCollaboration({
     socket,
     roomId:   session?.roomId,
@@ -182,6 +192,9 @@ export default function App() {
                 isDark={isDark}
                 activeFile={activeFile}
                 hasFiles={files.length > 0}
+                viewMode={viewMode}
+                onViewModeChange={switchViewMode}
+                whiteboardElementsCount={whiteboardElements.length}
                 onToggleTheme={() => setIsDark((d) => !d)}
                 onLanguageChange={handleLanguageChange}
                 onRun={handleRun}
@@ -205,8 +218,16 @@ export default function App() {
                   onSelectFile={switchFile}
                 />
 
-                {/* Editor + output column */}
-                <div className="flex flex-col flex-1 min-w-0">
+                {/* Editor column (shown in 'code' or 'split' view) */}
+                <div
+                  className={`flex flex-col min-w-0 ${
+                    viewMode === "code"
+                      ? "flex-1"
+                      : viewMode === "split"
+                      ? "flex-1 border-r border-line"
+                      : "hidden"
+                  }`}
+                >
                   <Editor
                     code={code}
                     language={language}
@@ -231,6 +252,30 @@ export default function App() {
                       />
                     )}
                   </AnimatePresence>
+                </div>
+
+                {/* Whiteboard column (shown in 'split' or 'whiteboard' view) */}
+                <div
+                  className={`flex flex-col min-w-0 h-full relative ${
+                    viewMode === "whiteboard"
+                      ? "flex-1"
+                      : viewMode === "split"
+                      ? "flex-1"
+                      : "hidden"
+                  }`}
+                >
+                  <Whiteboard
+                    roomId={session.roomId}
+                    currentUser={currentUser}
+                    elements={whiteboardElements}
+                    onChange={handleWhiteboardChange}
+                    onDrawStep={handleWhiteboardDrawStep}
+                    remoteLiveStroke={remoteLiveStroke}
+                    remoteCursors={remoteWhiteboardCursors}
+                    onCursorMove={handleWhiteboardCursor}
+                    onClear={handleWhiteboardClear}
+                    isDark={isDark}
+                  />
                 </div>
 
                 {/* Chat panel (animated slide-in) */}

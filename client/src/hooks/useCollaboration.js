@@ -33,6 +33,14 @@ export function useCollaboration({ socket, roomId, userName }) {
   const [activeFile, setActiveFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
 
+  // ── Whiteboard collaborative state ───────────────────────────────────────
+  const [whiteboardElements, setWhiteboardElements] = useState([]);
+  const [remoteWhiteboardCursors, setRemoteWhiteboardCursors] = useState({});
+  const [remoteLiveStroke, setRemoteLiveStroke] = useState(null);
+
+  // ── Room-wide synchronized view mode ('code' | 'split' | 'whiteboard') ───
+  const [viewMode, setViewMode] = useState("code");
+
   // Prevent looping our own code-change back into the editor
   const isRemoteChange = useRef(false);
   const typingTimer    = useRef(null);
@@ -45,8 +53,8 @@ export function useCollaboration({ socket, roomId, userName }) {
 
     socket.emit("join-room", { roomId, userName });
 
-    // Receive full room state on join (includes existing lineAuthors blame map)
-    socket.on("room-state", ({ code: c, language: l, users: u, lineAuthors: la, files: f, activeFile: af }) => {
+    // Receive full room state on join (includes existing lineAuthors blame map & whiteboard & viewMode)
+    socket.on("room-state", ({ code: c, language: l, users: u, lineAuthors: la, files: f, activeFile: af, whiteboard: wb, viewMode: vm }) => {
       isRemoteChange.current = true;
       setCode(c);
       setLanguageSt(l);
@@ -55,6 +63,8 @@ export function useCollaboration({ socket, roomId, userName }) {
       if (la) setLineAuthors(la);
       if (f) setFiles(f);
       if (af !== undefined) setActiveFile(af);
+      if (wb) setWhiteboardElements(wb);
+      if (vm) setViewMode(vm);
     });
 
     // Another user joined
@@ -66,6 +76,11 @@ export function useCollaboration({ socket, roomId, userName }) {
     socket.on("user-left", ({ userId }) => {
       setUsers((prev) => prev.filter((u) => u.id !== userId));
       setRemoteCursors((prev) => {
+        const next = { ...prev };
+        delete next[userId];
+        return next;
+      });
+      setRemoteWhiteboardCursors((prev) => {
         const next = { ...prev };
         delete next[userId];
         return next;
@@ -144,6 +159,33 @@ export function useCollaboration({ socket, roomId, userName }) {
       setLineAuthors(la || {});
     });
 
+    // ── Whiteboard collaborative sync ────────────────────────────────────────
+    socket.on("whiteboard-update", ({ elements }) => {
+      setWhiteboardElements(Array.isArray(elements) ? elements : []);
+      setRemoteLiveStroke(null);
+    });
+
+    socket.on("whiteboard-draw-step", ({ stroke, userId }) => {
+      if (userId === socket.id) return;
+      setRemoteLiveStroke({ stroke, userId });
+    });
+
+    socket.on("whiteboard-cursor-update", ({ userId, userName, color, cursor }) => {
+      if (userId === socket.id) return;
+      setRemoteWhiteboardCursors((prev) => ({
+        ...prev,
+        [userId]: { userName, color, ...cursor },
+      }));
+    });
+
+    // ── Synchronized View Mode (when anyone opens whiteboard, all peers switch) ──
+    socket.on("view-mode-update", ({ viewMode: vm }) => {
+      if (vm) {
+        setViewMode(vm);
+        setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
+      }
+    });
+
     return () => {
       socket.off("room-state");
       socket.off("user-joined");
@@ -159,6 +201,10 @@ export function useCollaboration({ socket, roomId, userName }) {
       socket.off("files-update");
       socket.off("rename-file-error");
       socket.off("active-file-changed");
+      socket.off("whiteboard-update");
+      socket.off("whiteboard-draw-step");
+      socket.off("whiteboard-cursor-update");
+      socket.off("view-mode-update");
     };
   }, [socket, roomId, userName]);
 
@@ -331,6 +377,44 @@ export function useCollaboration({ socket, roomId, userName }) {
     [socket, roomId, activeFile]
   );
 
+  // ── Whiteboard action dispatchers ─────────────────────────────────────────
+  const handleWhiteboardChange = useCallback(
+    (elements) => {
+      setWhiteboardElements(elements);
+      socket?.emit("whiteboard-update", { roomId, elements });
+    },
+    [socket, roomId]
+  );
+
+  const handleWhiteboardDrawStep = useCallback(
+    (stroke) => {
+      socket?.emit("whiteboard-draw-step", { roomId, stroke });
+    },
+    [socket, roomId]
+  );
+
+  const handleWhiteboardCursor = useCallback(
+    (cursor) => {
+      socket?.emit("whiteboard-cursor", { roomId, cursor });
+    },
+    [socket, roomId]
+  );
+
+  const handleWhiteboardClear = useCallback(() => {
+    setWhiteboardElements([]);
+    socket?.emit("whiteboard-clear", { roomId });
+  }, [socket, roomId]);
+
+  // ── Switch room view mode for EVERYONE in the room ───────────────────────
+  const switchViewMode = useCallback(
+    (newMode) => {
+      setViewMode(newMode);
+      socket?.emit("view-mode-change", { roomId, viewMode: newMode });
+      setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
+    },
+    [socket, roomId]
+  );
+
   return {
     code,
     language,
@@ -342,6 +426,12 @@ export function useCollaboration({ socket, roomId, userName }) {
     files,
     activeFile,
     isUploading,
+    viewMode,
+    switchViewMode,
+    whiteboardElements,
+    setWhiteboardElements,
+    remoteWhiteboardCursors,
+    remoteLiveStroke,
     handleCodeChange,
     handleLanguageChange,
     handleCursorChange,
@@ -352,5 +442,9 @@ export function useCollaboration({ socket, roomId, userName }) {
     renameFile,
     deleteFile,
     switchFile,
+    handleWhiteboardChange,
+    handleWhiteboardDrawStep,
+    handleWhiteboardCursor,
+    handleWhiteboardClear,
   };
 }

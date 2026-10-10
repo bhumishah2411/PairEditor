@@ -64,6 +64,10 @@ function getRoom(roomId) {
       // lineAuthorsByFile: Map<path, Map<line, authorInfo>> — blame per file,
       // restored into `lineAuthors` whenever that file becomes active.
       lineAuthorsByFile: new Map(),
+      // ── Whiteboard collaborative canvas elements ────────────────────────
+      whiteboard: [],
+      // ── Room view mode ('code' | 'split' | 'whiteboard') ─────────────────
+      viewMode: "code",
     });
   }
   return rooms.get(roomId);
@@ -179,6 +183,8 @@ io.on("connection", (socket) => {
       lineAuthors: Object.fromEntries(room.lineAuthors),
       files: fileListFor(room),
       activeFile: room.activeFile,
+      whiteboard: room.whiteboard || [],
+      viewMode: room.viewMode || "code",
     });
 
     // Notify everyone else that a new user joined
@@ -467,6 +473,50 @@ io.on("connection", (socket) => {
       timestamp: Date.now(),
     };
     io.to(roomId).emit("chat-message", payload);
+  });
+
+  // ── whiteboard events ──────────────────────────────────────────────────────
+  socket.on("whiteboard-update", ({ roomId, elements }) => {
+    const room = rooms.get(roomId);
+    if (!room) return;
+    room.whiteboard = Array.isArray(elements) ? elements : [];
+    socket.to(roomId).emit("whiteboard-update", { elements: room.whiteboard });
+  });
+
+  socket.on("whiteboard-draw-step", ({ roomId, stroke }) => {
+    socket.to(roomId).emit("whiteboard-draw-step", { stroke, userId: socket.id });
+  });
+
+  socket.on("whiteboard-cursor", ({ roomId, cursor }) => {
+    const room = rooms.get(roomId);
+    if (!room) return;
+    const user = room.users.get(socket.id);
+    socket.to(roomId).emit("whiteboard-cursor-update", {
+      userId: socket.id,
+      userName: user?.name || "Peer",
+      color: user?.color || "#6FE3A6",
+      cursor,
+    });
+  });
+
+  socket.on("whiteboard-clear", ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (!room) return;
+    room.whiteboard = [];
+    io.to(roomId).emit("whiteboard-update", { elements: [] });
+  });
+
+  // ── view-mode-change ──────────────────────────────────────────────────────
+  socket.on("view-mode-change", ({ roomId, viewMode }) => {
+    const room = rooms.get(roomId);
+    if (!room) return;
+    room.viewMode = viewMode;
+    const user = room.users.get(socket.id);
+    io.to(roomId).emit("view-mode-update", {
+      viewMode,
+      senderName: user?.name || "Peer",
+      senderId: socket.id,
+    });
   });
 
   // ── disconnect ─────────────────────────────────────────────────────────────
