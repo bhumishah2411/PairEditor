@@ -1847,18 +1847,23 @@ io.on("connection", (socket) => {
   });
 
   // ── Team Chat (stays room-wide for all members in the room) ────────────────
-  socket.on("chat-message", ({ message }) => {
+  socket.on("chat-message", (data) => {
     const roomId = socket.roomId;
     if (!roomId) return;
     const room = rooms.get(roomId);
     if (!room) return;
     const user = room.users.get(socket.id);
+    const message = typeof data === "string" ? data : (data?.message || "");
+    const audioUrl = typeof data === "object" ? data?.audioUrl : null;
+    const duration = typeof data === "object" ? data?.duration : null;
     const payload = {
       id: uuidv4(),
       userId: socket.id,
       userName: user?.name || "Anonymous",
       color: user?.color || "#fff",
-      message,
+      message: message || (audioUrl ? "🎤 Voice message" : ""),
+      audioUrl: audioUrl || null,
+      duration: duration || null,
       timestamp: Date.now(),
     };
     io.to(roomId).emit("chat-message", payload);
