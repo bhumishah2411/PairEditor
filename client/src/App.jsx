@@ -25,6 +25,7 @@ import ChatPanel      from "./components/ChatPanel";
 import OutputPanel    from "./components/OutputPanel";
 import CollabRequests from "./components/CollabRequests";
 import LeaveConfirmModal from "./components/LeaveConfirmModal";
+import GitHubModal from "./components/GitHubModal";
 
 export default function App() {
   // ── Theme ────────────────────────────────────────────────────────────────
@@ -45,6 +46,7 @@ export default function App() {
   // ── Collaboration & Workspace ─────────────────────────────────────────────
   const {
     code,
+    originalCode,
     language,
     users,
     teamUsers,
@@ -52,6 +54,7 @@ export default function App() {
     workspaceId,
     sessionId,
     sessionMembers,
+    githubRepo,
     incomingRequests,
     outgoingRequests,
     remoteCursors,
@@ -95,8 +98,9 @@ export default function App() {
   const [showOutput,     setShowOutput]     = useState(false);
   const [output,         setOutput]         = useState(null);
   const [isRunning,      setIsRunning]      = useState(false);
-  const [showLeaveModal, setShowLeaveModal] = useState(false);
-  const [isLeaving,      setIsLeaving]      = useState(false);
+  const [showLeaveModal,  setShowLeaveModal]  = useState(false);
+  const [isLeaving,       setIsLeaving]       = useState(false);
+  const [showGitHubModal, setShowGitHubModal] = useState(false);
 
   const handleConfirmLeave = () => {
     if (isLeaving) return;
@@ -277,6 +281,20 @@ export default function App() {
         isLeaving={isLeaving}
       />
 
+      {/* GitHub Integration Modal */}
+      <GitHubModal
+        isOpen={showGitHubModal}
+        onClose={() => setShowGitHubModal(false)}
+        roomId={session?.roomId}
+        workspaceId={workspaceId}
+        currentRepo={githubRepo}
+        filesCount={files.length || (code ? 1 : 0)}
+        currentUser={currentUser}
+        code={code}
+        activeFile={activeFile}
+        files={files}
+      />
+
       <div className={`h-screen flex flex-col overflow-hidden ${isDark ? "dark" : "light"}`}>
         <AnimatePresence mode="wait">
           {!session ? (
@@ -302,6 +320,8 @@ export default function App() {
                 viewMode={viewMode}
                 onViewModeChange={switchViewMode}
                 whiteboardElementsCount={whiteboardElements.length}
+                githubRepo={githubRepo}
+                onOpenGitHubModal={() => setShowGitHubModal(true)}
                 onToggleTheme={() => setIsDark((d) => !d)}
                 onLanguageChange={handleLanguageChange}
                 onRun={handleRun}
@@ -329,6 +349,7 @@ export default function App() {
                   onRenameFile={renameFile}
                   onDeleteFile={deleteFile}
                   onSelectFile={switchFile}
+                  onOpenGitHubModal={() => setShowGitHubModal(true)}
                 />
 
                 {/* Editor column (shown in 'code' or 'split' view) */}
@@ -343,6 +364,7 @@ export default function App() {
                 >
                   <Editor
                     code={code}
+                    originalCode={originalCode}
                     language={language}
                     isDark={isDark}
                     users={users}

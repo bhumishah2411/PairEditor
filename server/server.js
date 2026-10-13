@@ -127,6 +127,7 @@ function createPersonalWorkspace(socketId) {
     whiteboard: [],
     viewMode: "code",
     members: new Set([socketId]),
+    githubRepo: null,
   };
 }
 
@@ -135,7 +136,11 @@ function cloneWorkspaceForSession(sourceWs, sessionWsId) {
   const newFiles = new Map();
   if (sourceWs?.files) {
     sourceWs.files.forEach((fileObj, path) => {
-      newFiles.set(path, { code: fileObj.code, language: fileObj.language });
+      newFiles.set(path, {
+        code: fileObj.code,
+        language: fileObj.language,
+        originalCode: fileObj.originalCode !== undefined ? String(fileObj.originalCode) : undefined,
+      });
     });
   }
 
@@ -158,30 +163,39 @@ function cloneWorkspaceForSession(sourceWs, sessionWsId) {
     whiteboard: JSON.parse(JSON.stringify(sourceWs?.whiteboard || [])),
     viewMode: sourceWs?.viewMode ?? "code",
     members: new Set(),
+    githubRepo: sourceWs?.githubRepo ? { ...sourceWs.githubRepo } : null,
   };
 }
 
-/** Serialise a workspace's file list (path + language only — keeps it lightweight) */
+/** Serialise a workspace's file list (path + language + isModified) */
 function fileListFor(ws) {
   if (!ws || !ws.files) return [];
-  return [...ws.files.keys()].map((path) => ({
-    path,
-    language: ws.files.get(path).language,
-  }));
+  return [...ws.files.keys()].map((path) => {
+    const f = ws.files.get(path);
+    const currentCode = ws.activeFile === path ? ws.code : f.code;
+    return {
+      path,
+      language: f.language,
+      isModified: Boolean(f?.originalCode !== undefined && f?.originalCode !== currentCode),
+    };
+  });
 }
 
 /** Format full workspace payload to send to clients */
 function workspaceStatePayload(ws) {
+  const activeObj = ws.activeFile && ws.files ? ws.files.get(ws.activeFile) : null;
   return {
     workspaceId: ws.id,
     workspaceType: ws.type,
     code: ws.code,
     language: ws.language,
+    originalCode: activeObj?.originalCode ?? null,
     lineAuthors: Object.fromEntries(ws.lineAuthors),
     files: fileListFor(ws),
     activeFile: ws.activeFile,
     whiteboard: ws.whiteboard || [],
     viewMode: ws.viewMode || "code",
+    githubRepo: ws.githubRepo || null,
   };
 }
 
@@ -229,7 +243,11 @@ function cloneWorkspaceForPersonal(sourceWs, personalWsId) {
   const newFiles = new Map();
   if (sourceWs?.files) {
     sourceWs.files.forEach((fileObj, path) => {
-      newFiles.set(path, { code: String(fileObj.code ?? ""), language: fileObj.language || "plaintext" });
+      newFiles.set(path, {
+        code: String(fileObj.code ?? ""),
+        language: fileObj.language || "plaintext",
+        originalCode: fileObj.originalCode !== undefined ? String(fileObj.originalCode) : undefined,
+      });
     });
   }
 
@@ -261,6 +279,7 @@ function cloneWorkspaceForPersonal(sourceWs, personalWsId) {
     whiteboard: clonedWhiteboard,
     viewMode: sourceWs?.viewMode ?? "code",
     members: new Set([socketId]),
+    githubRepo: sourceWs?.githubRepo ? { ...sourceWs.githubRepo } : null,
   };
 }
 
@@ -423,6 +442,871 @@ app.get("/api/room/:roomId/download", (req, res) => {
   });
 
   archive.finalize();
+});
+
+// ── GitHub Integration Endpoints ─────────────────────────────────────────────
+/** Parse a GitHub repo URL or shorthand into { owner, repo, branch } */
+function parseGitHubUrl(input) {
+  if (!input) return null;
+  let str = input.trim().replace(/\.git$/, "");
+  // Format: https://github.com/owner/repo/tree/branch
+  const treeMatch = str.match(/github\.com\/([^\/]+)\/([^\/]+)\/tree\/(.+)/i);
+  if (treeMatch) {
+    return { owner: treeMatch[1], repo: treeMatch[2], branch: treeMatch[3] };
+  }
+  // Format: https://github.com/owner/repo
+  const urlMatch = str.match(/github\.com\/([^\/]+)\/([^\/]+)/i);
+  if (urlMatch) {
+    return { owner: urlMatch[1], repo: urlMatch[2], branch: null };
+  }
+  // Format: owner/repo
+  const slashMatch = str.match(/^([^\/]+)\/([^\/]+)$/);
+  if (slashMatch) {
+    return { owner: slashMatch[1], repo: slashMatch[2], branch: null };
+  }
+  return null;
+}
+
+/**
+ * Import a GitHub repository into the active workspace.
+ * POST /api/github/import
+ * Body: { roomId, workspaceId, repoUrl, branch, token }
+ */
+app.post("/api/github/import", async (req, res) => {
+  const { roomId, workspaceId, repoUrl, branch: reqBranch, token } = req.body;
+  const parsed = parseGitHubUrl(repoUrl);
+  if (!parsed) {
+    return res.status(400).json({
+      error: "Invalid repository format. Please enter 'owner/repo' (e.g. facebook/react) or full GitHub URL.",
+    });
+  }
+
+  const { owner, repo } = parsed;
+  let branch = reqBranch || parsed.branch;
+
+  const headers = {
+    "User-Agent": "PairEditor-App",
+    "Accept": "application/vnd.github.v3+json",
+  };
+  if (token && token.trim()) {
+    headers["Authorization"] = `Bearer ${token.trim()}`;
+  }
+
+  try {
+    // 1. Resolve default branch if not specified
+    if (!branch) {
+      const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+      if (!repoRes.ok) {
+        if (repoRes.status === 404) {
+          return res.status(404).json({
+            error: `Repository '${owner}/${repo}' not found. If it is private, please provide a GitHub Personal Access Token.`,
+          });
+        }
+        if (repoRes.status === 401 || repoRes.status === 403) {
+          const errData = await repoRes.json().catch(() => ({}));
+          return res.status(repoRes.status).json({
+            error: errData.message || "GitHub API rate limit exceeded or invalid token. Please provide a Personal Access Token.",
+          });
+        }
+        return res.status(repoRes.status).json({ error: "Failed to fetch repository from GitHub." });
+      }
+      const repoData = await repoRes.json();
+      branch = repoData.default_branch || "main";
+    }
+
+    // 2. Fetch recursive git tree
+    const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`, { headers });
+    if (!treeRes.ok) {
+      return res.status(treeRes.status).json({
+        error: `Could not fetch branch '${branch}' for ${owner}/${repo}. Check if the branch name is correct.`,
+      });
+    }
+    const treeData = await treeRes.json();
+    if (!treeData.tree || !Array.isArray(treeData.tree)) {
+      return res.status(400).json({ error: "No files found in the specified repository branch." });
+    }
+
+    // 3. Filter files: Keep text files, skip binary/node_modules/.git/dist
+    const IGNORED_PREFIXES = ["node_modules/", ".git/", ".vscode/", ".idea/", "dist/", "build/", ".next/", "vendor/"];
+    const IGNORED_EXTS = new Set([
+      "png", "jpg", "jpeg", "gif", "webp", "ico", "svg", "pdf", "zip", "tar", "gz",
+      "exe", "dll", "so", "dylib", "mp3", "mp4", "wav", "woff", "woff2", "ttf", "eot",
+      "lock", "bin", "pyc", "class", "jar"
+    ]);
+
+    const candidateFiles = treeData.tree.filter((item) => {
+      if (item.type !== "blob") return false;
+      const p = item.path;
+      if (IGNORED_PREFIXES.some((prefix) => p.startsWith(prefix) || p.includes("/" + prefix))) return false;
+      const ext = p.split(".").pop()?.toLowerCase();
+      if (IGNORED_EXTS.has(ext)) return false;
+      // Skip files larger than 250KB to keep the collaborative editor blazing fast
+      if (item.size && item.size > 250 * 1024) return false;
+      return true;
+    }).slice(0, 100); // Up to 100 source code files
+
+    if (candidateFiles.length === 0) {
+      return res.status(400).json({ error: "No editable source code files found in repository." });
+    }
+
+    // 4. Resolve target workspace
+    let targetWs = null;
+    if (workspaceId && workspaces.has(workspaceId)) {
+      targetWs = workspaces.get(workspaceId);
+    } else {
+      for (const [, ws] of workspaces.entries()) {
+        targetWs = ws;
+        break;
+      }
+    }
+    if (!targetWs) {
+      return res.status(404).json({ error: "Target workspace not found." });
+    }
+
+    // 5. Download file contents in parallel batches of 10
+    const fetchedFiles = [];
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < candidateFiles.length; i += BATCH_SIZE) {
+      const batch = candidateFiles.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (item) => {
+          try {
+            const blobRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/blobs/${item.sha}`, {
+              headers: { ...headers, "Accept": "application/vnd.github.raw+json" },
+            });
+            if (blobRes.ok) {
+              const text = await blobRes.text();
+              return { path: item.path, content: text, language: guessLanguageFromPath(item.path) };
+            }
+          } catch (e) {
+            console.warn(`[github/import] Failed blob fetch for ${item.path}:`, e.message);
+          }
+          return null;
+        })
+      );
+      fetchedFiles.push(...batchResults.filter(Boolean));
+    }
+
+    if (fetchedFiles.length === 0) {
+      return res.status(500).json({ error: "Failed to download file contents from GitHub." });
+    }
+
+    // 6. Update target workspace files
+    targetWs.files = new Map();
+    fetchedFiles.forEach(({ path, content, language }) => {
+      targetWs.files.set(path, { code: content, language, originalCode: content });
+    });
+
+    // Select suitable default active file
+    const preferredFiles = ["README.md", "src/App.jsx", "src/App.js", "src/index.js", "src/main.jsx", "index.html", "index.js", "package.json"];
+    const foundPref = preferredFiles.find((p) => targetWs.files.has(p));
+    targetWs.activeFile = foundPref || fetchedFiles[0].path;
+
+    const activeObj = targetWs.files.get(targetWs.activeFile);
+    targetWs.code = activeObj.code;
+    targetWs.language = activeObj.language;
+    targetWs.lineAuthors = new Map();
+    targetWs.githubRepo = {
+      owner,
+      repo,
+      branch,
+      repoUrl: `https://github.com/${owner}/${repo}`,
+      importedAt: Date.now(),
+    };
+
+    // 7. Emit updates to workspace members
+    io.to(`ws:${targetWs.id}`).emit("files-update", {
+      files: fileListFor(targetWs),
+      activeFile: targetWs.activeFile,
+    });
+    io.to(`ws:${targetWs.id}`).emit("active-file-changed", {
+      path: targetWs.activeFile,
+      code: targetWs.code,
+      language: targetWs.language,
+      originalCode: activeObj.originalCode ?? null,
+      lineAuthors: {},
+    });
+    io.to(`ws:${targetWs.id}`).emit("github-repo-linked", targetWs.githubRepo);
+
+    // Broadcast room notification
+    if (roomId) {
+      io.to(roomId).emit("chat-message", {
+        id: uuidv4(),
+        userId: "system",
+        userName: "GitHub",
+        color: "#6FE3A6",
+        message: `📦 Imported ${fetchedFiles.length} files from ${owner}/${repo}@${branch}`,
+        timestamp: Date.now(),
+      });
+    }
+
+    res.json({
+      success: true,
+      count: fetchedFiles.length,
+      owner,
+      repo,
+      branch,
+      activeFile: targetWs.activeFile,
+      githubRepo: targetWs.githubRepo,
+    });
+  } catch (err) {
+    console.error("[github/import] error:", err);
+    res.status(500).json({ error: err.message || "Failed to import from GitHub." });
+  }
+});
+
+/**
+ * Commit and push current workspace files to GitHub using Git Data API.
+ * POST /api/github/push
+ * Body: { roomId, workspaceId, owner, repo, branch, createBranch, message, token, authorName, authorEmail }
+ */
+app.post("/api/github/push", async (req, res) => {
+  const {
+    roomId,
+    workspaceId,
+    owner,
+    repo,
+    branch,
+    createBranch,
+    message,
+    token,
+    authorName,
+    authorEmail,
+  } = req.body;
+
+  if (!token || !token.trim()) {
+    return res.status(400).json({
+      error: "GitHub Personal Access Token is required to commit and push changes.",
+    });
+  }
+  if (!owner || !repo || !branch) {
+    return res.status(400).json({
+      error: "Repository owner, repo name, and branch are required.",
+    });
+  }
+
+  const clientCode = req.body.code;
+  const clientActiveFile = req.body.activeFile || "index.html";
+
+  let targetWs = null;
+  if (workspaceId && workspaces.has(workspaceId)) {
+    targetWs = workspaces.get(workspaceId);
+  } else {
+    // 1. Look for any workspace that has files
+    for (const [, ws] of workspaces.entries()) {
+      if (ws.files && ws.files.size > 0) {
+        targetWs = ws;
+        break;
+      }
+    }
+    // 2. Check room members if roomId is provided
+    if (!targetWs && roomId && rooms.has(roomId)) {
+      const room = rooms.get(roomId);
+      if (room && room.users) {
+        for (const [, u] of room.users.entries()) {
+          const ws = workspaces.get(u.workspaceId);
+          if (ws && ws.files && ws.files.size > 0) {
+            targetWs = ws;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // 3. If targetWs is still missing, recreate or adopt
+  if (!targetWs) {
+    const wsId = workspaceId || `workspace:${uuidv4()}`;
+    targetWs = createPersonalWorkspace(wsId);
+    workspaces.set(targetWs.id, targetWs);
+  }
+
+  // 4. Sync client's live code & activeFile to targetWs
+  if (clientCode !== undefined && clientActiveFile) {
+    if (targetWs.files.has(clientActiveFile)) {
+      targetWs.files.get(clientActiveFile).code = clientCode;
+    } else {
+      targetWs.files.set(clientActiveFile, {
+        code: clientCode,
+        language: guessLanguageFromPath(clientActiveFile),
+      });
+    }
+    targetWs.activeFile = clientActiveFile;
+    targetWs.code = clientCode;
+  } else if (targetWs.activeFile && targetWs.files.has(targetWs.activeFile)) {
+    targetWs.files.get(targetWs.activeFile).code = targetWs.code;
+  }
+
+  // 5. If targetWs still has 0 files, check if targetWs.code has content to save as default file
+  if (!targetWs.files || targetWs.files.size === 0) {
+    if (targetWs.code && targetWs.code.trim()) {
+      const defaultName = targetWs.activeFile || "index.html";
+      targetWs.files.set(defaultName, {
+        code: targetWs.code,
+        language: targetWs.language || guessLanguageFromPath(defaultName),
+      });
+      targetWs.activeFile = defaultName;
+    } else {
+      return res.status(400).json({ error: "No files found in workspace to commit. Open or edit a file before pushing." });
+    }
+  }
+
+  const cleanToken = token.trim();
+  const headers = {
+    "User-Agent": "PairEditor-App",
+    "Accept": "application/vnd.github.v3+json",
+    "Authorization": `Bearer ${cleanToken}`,
+    "Content-Type": "application/json",
+  };
+
+  try {
+    // 1. Get branch reference
+    let latestCommitSha = null;
+    let refRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`, { headers });
+
+    if (refRes.status === 404 && createBranch) {
+      // Find default branch to branch off of
+      const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+      if (!repoRes.ok) {
+        return res.status(repoRes.status).json({ error: `Repository '${owner}/${repo}' not found or access denied.` });
+      }
+      const repoData = await repoRes.json();
+      const defaultBranch = repoData.default_branch || "main";
+
+      const defRefRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(defaultBranch)}`, { headers });
+      if (!defRefRes.ok) {
+        return res.status(defRefRes.status).json({ error: `Could not read default branch '${defaultBranch}'.` });
+      }
+      const defRefData = await defRefRes.json();
+      const baseSha = defRefData.object.sha;
+
+      // Create the new branch
+      const createRefRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/refs`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          ref: `refs/heads/${branch}`,
+          sha: baseSha,
+        }),
+      });
+      if (!createRefRes.ok) {
+        const err = await createRefRes.json().catch(() => ({}));
+        return res.status(createRefRes.status).json({ error: err.message || `Failed to create branch '${branch}'.` });
+      }
+      const createRefData = await createRefRes.json();
+      latestCommitSha = createRefData.object.sha;
+    } else if (!refRes.ok) {
+      if (refRes.status === 404) {
+        return res.status(404).json({
+          error: `Branch '${branch}' does not exist on ${owner}/${repo}. Check 'Create branch if not exists' to create it automatically.`,
+        });
+      }
+      if (refRes.status === 401 || refRes.status === 403) {
+        return res.status(refRes.status).json({
+          error: "Authentication failed. Ensure your Personal Access Token has 'repo' scope permissions.",
+        });
+      }
+      return res.status(refRes.status).json({ error: `Failed to fetch branch '${branch}'.` });
+    } else {
+      const refData = await refRes.json();
+      latestCommitSha = refData.object.sha;
+    }
+
+    // 2. Get base commit to get tree SHA
+    const commitRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/commits/${latestCommitSha}`, { headers });
+    if (!commitRes.ok) {
+      return res.status(commitRes.status).json({ error: "Failed to fetch base commit." });
+    }
+    const commitData = await commitRes.json();
+    const baseTreeSha = commitData.tree.sha;
+
+    // 3. Create blobs for all workspace files
+    const treeEntries = [];
+    for (const [filePath, fileObj] of targetWs.files.entries()) {
+      const blobRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/blobs`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          content: fileObj.code || "",
+          encoding: "utf-8",
+        }),
+      });
+      if (!blobRes.ok) {
+        const err = await blobRes.json().catch(() => ({}));
+        return res.status(blobRes.status).json({
+          error: `Failed to create Git blob for '${filePath}': ${err.message || ""}`,
+        });
+      }
+      const blobData = await blobRes.json();
+      treeEntries.push({
+        path: filePath,
+        mode: "100644",
+        type: "blob",
+        sha: blobData.sha,
+      });
+    }
+
+    // 4. Create new Git tree
+    const newTreeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        base_tree: baseTreeSha,
+        tree: treeEntries,
+      }),
+    });
+    if (!newTreeRes.ok) {
+      const err = await newTreeRes.json().catch(() => ({}));
+      return res.status(newTreeRes.status).json({ error: `Failed to create Git tree: ${err.message || ""}` });
+    }
+    const newTreeData = await newTreeRes.json();
+    const newTreeSha = newTreeData.sha;
+
+    // 5. Create new commit
+    const newCommitRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/commits`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        message: message || "Update from PairEditor collaborative session",
+        tree: newTreeSha,
+        parents: [latestCommitSha],
+        author: {
+          name: authorName || "PairEditor User",
+          email: authorEmail || "collab@paireditor.dev",
+          date: new Date().toISOString(),
+        },
+      }),
+    });
+    if (!newCommitRes.ok) {
+      const err = await newCommitRes.json().catch(() => ({}));
+      return res.status(newCommitRes.status).json({ error: `Failed to create commit: ${err.message || ""}` });
+    }
+    const newCommitData = await newCommitRes.json();
+    const newCommitSha = newCommitData.sha;
+
+    // 6. Update branch reference
+    const updateRefRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        sha: newCommitSha,
+        force: false,
+      }),
+    });
+    if (!updateRefRes.ok) {
+      const err = await updateRefRes.json().catch(() => ({}));
+      return res.status(updateRefRes.status).json({
+        error: `Failed to update branch reference '${branch}': ${err.message || ""}`,
+      });
+    }
+
+    const commitUrl = `https://github.com/${owner}/${repo}/commit/${newCommitSha}`;
+
+    targetWs.githubRepo = {
+      owner,
+      repo,
+      branch,
+      repoUrl: `https://github.com/${owner}/${repo}`,
+      lastCommitSha: newCommitSha,
+      lastCommitUrl: commitUrl,
+      lastPushedAt: Date.now(),
+    };
+
+    // Since files are now pushed to GitHub, update originalCode to match current code
+    for (const [, f] of targetWs.files.entries()) {
+      f.originalCode = f.code;
+    }
+    const currentActive = targetWs.activeFile && targetWs.files.has(targetWs.activeFile)
+      ? targetWs.files.get(targetWs.activeFile)
+      : null;
+
+    io.to(`ws:${targetWs.id}`).emit("github-repo-linked", targetWs.githubRepo);
+    io.to(`ws:${targetWs.id}`).emit("files-update", {
+      files: fileListFor(targetWs),
+      activeFile: targetWs.activeFile,
+    });
+    if (currentActive) {
+      io.to(`ws:${targetWs.id}`).emit("active-file-changed", {
+        path: targetWs.activeFile,
+        code: targetWs.code,
+        language: targetWs.language,
+        originalCode: currentActive.originalCode ?? null,
+        lineAuthors: Object.fromEntries(targetWs.lineAuthors),
+      });
+    }
+
+    // Announce in room chat
+    if (roomId) {
+      io.to(roomId).emit("chat-message", {
+        id: uuidv4(),
+        userId: "system",
+        userName: "GitHub",
+        color: "#6FE3A6",
+        message: `🚀 ${authorName || "Someone"} pushed commit ${newCommitSha.slice(0, 7)} to ${branch}: "${message || "Update"}"`,
+        timestamp: Date.now(),
+      });
+    }
+
+    res.json({
+      success: true,
+      commitSha: newCommitSha,
+      commitUrl,
+      branch,
+      filesCount: treeEntries.length,
+      githubRepo: targetWs.githubRepo,
+    });
+  } catch (err) {
+    console.error("[github/push] error:", err);
+    res.status(500).json({ error: err.message || "Failed to commit and push to GitHub." });
+  }
+});
+
+/**
+ * Pull latest changes from GitHub for a repository into the workspace.
+ * POST /api/github/pull
+ * Body: { roomId, workspaceId, owner, repo, branch, token }
+ */
+app.post("/api/github/pull", async (req, res) => {
+  const { roomId, workspaceId, owner: reqOwner, repo: reqRepo, branch: reqBranch, token } = req.body;
+
+  let targetWs = null;
+  if (workspaceId && workspaces.has(workspaceId)) {
+    targetWs = workspaces.get(workspaceId);
+  } else {
+    for (const [, ws] of workspaces.entries()) {
+      if (ws.githubRepo || (ws.files && ws.files.size > 0)) {
+        targetWs = ws;
+        break;
+      }
+    }
+  }
+
+  if (!targetWs) {
+    const wsId = workspaceId || `workspace:${uuidv4()}`;
+    targetWs = createPersonalWorkspace(wsId);
+    workspaces.set(targetWs.id, targetWs);
+  }
+
+  const owner = reqOwner || targetWs.githubRepo?.owner;
+  const repo = reqRepo || targetWs.githubRepo?.repo;
+  let branch = reqBranch || targetWs.githubRepo?.branch || "main";
+
+  if (!owner || !repo) {
+    return res.status(400).json({ error: "Repository owner and repo name are required to pull." });
+  }
+
+  const headers = {
+    "User-Agent": "PairEditor-App",
+    "Accept": "application/vnd.github.v3+json",
+  };
+  if (token && token.trim()) {
+    headers["Authorization"] = `Bearer ${token.trim()}`;
+  }
+
+  try {
+    // 1. Fetch branch commit to know latest SHA
+    const branchRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`, { headers });
+    let latestSha = null;
+    if (branchRes.ok) {
+      const bData = await branchRes.json();
+      latestSha = bData.object?.sha;
+    }
+
+    // 2. Fetch recursive git tree
+    const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`, { headers });
+    if (!treeRes.ok) {
+      if (treeRes.status === 404) {
+        return res.status(404).json({ error: `Branch '${branch}' or repository '${owner}/${repo}' not found on GitHub.` });
+      }
+      return res.status(treeRes.status).json({ error: "Failed to fetch repository tree from GitHub." });
+    }
+
+    const treeData = await treeRes.json();
+    if (!treeData.tree || !Array.isArray(treeData.tree)) {
+      return res.status(400).json({ error: "No files found in the specified repository branch." });
+    }
+
+    // 3. Filter candidate files
+    const IGNORED_PREFIXES = ["node_modules/", ".git/", ".vscode/", ".idea/", "dist/", "build/", ".next/", "vendor/"];
+    const IGNORED_EXTS = new Set([
+      "png", "jpg", "jpeg", "gif", "webp", "ico", "svg", "pdf", "zip", "tar", "gz",
+      "exe", "dll", "so", "dylib", "mp3", "mp4", "wav", "woff", "woff2", "ttf", "eot",
+      "lock", "bin", "pyc", "class", "jar"
+    ]);
+
+    const candidateFiles = treeData.tree.filter((item) => {
+      if (item.type !== "blob") return false;
+      const p = item.path;
+      if (IGNORED_PREFIXES.some((prefix) => p.startsWith(prefix) || p.includes("/" + prefix))) return false;
+      const ext = p.split(".").pop()?.toLowerCase();
+      if (IGNORED_EXTS.has(ext)) return false;
+      if (item.size && item.size > 250 * 1024) return false;
+      return true;
+    }).slice(0, 100);
+
+    // 4. Download file blobs in batches
+    const fetchedFiles = [];
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < candidateFiles.length; i += BATCH_SIZE) {
+      const batch = candidateFiles.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (item) => {
+          try {
+            const blobRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/blobs/${item.sha}`, {
+              headers: { ...headers, "Accept": "application/vnd.github.raw+json" },
+            });
+            if (blobRes.ok) {
+              const text = await blobRes.text();
+              return { path: item.path, content: text, language: guessLanguageFromPath(item.path) };
+            }
+          } catch (e) {
+            console.warn(`[github/pull] Failed blob fetch for ${item.path}:`, e.message);
+          }
+          return null;
+        })
+      );
+      fetchedFiles.push(...batchResults.filter(Boolean));
+    }
+
+    if (fetchedFiles.length === 0) {
+      return res.status(500).json({ error: "Failed to download file contents from GitHub." });
+    }
+
+    // 5. Update target workspace files
+    targetWs.files = new Map();
+    fetchedFiles.forEach(({ path, content, language }) => {
+      targetWs.files.set(path, { code: content, language, originalCode: content });
+    });
+
+    // Retain existing activeFile if it exists in the fetched files, else pick preferred
+    if (!targetWs.activeFile || !targetWs.files.has(targetWs.activeFile)) {
+      const preferredFiles = ["index.html", "src/App.jsx", "src/App.js", "README.md", "src/index.js", "package.json"];
+      const foundPref = preferredFiles.find((p) => targetWs.files.has(p));
+      targetWs.activeFile = foundPref || fetchedFiles[0].path;
+    }
+
+    const activeObj = targetWs.files.get(targetWs.activeFile);
+    targetWs.code = activeObj.code;
+    targetWs.language = activeObj.language;
+    targetWs.githubRepo = {
+      owner,
+      repo,
+      branch,
+      repoUrl: `https://github.com/${owner}/${repo}`,
+      lastCommitSha: latestSha,
+      lastPulledAt: Date.now(),
+    };
+
+    // 6. Broadcast updates to workspace members
+    io.to(`ws:${targetWs.id}`).emit("files-update", {
+      files: fileListFor(targetWs),
+      activeFile: targetWs.activeFile,
+    });
+    io.to(`ws:${targetWs.id}`).emit("active-file-changed", {
+      path: targetWs.activeFile,
+      code: targetWs.code,
+      language: targetWs.language,
+      originalCode: activeObj.originalCode ?? null,
+      lineAuthors: {},
+    });
+    io.to(`ws:${targetWs.id}`).emit("github-repo-linked", targetWs.githubRepo);
+
+    if (roomId) {
+      io.to(roomId).emit("chat-message", {
+        id: uuidv4(),
+        userId: "system",
+        userName: "GitHub",
+        color: "#6FE3A6",
+        message: `📥 Pulled latest changes (${fetchedFiles.length} files) from ${owner}/${repo}@${branch}`,
+        timestamp: Date.now(),
+      });
+    }
+
+    res.json({
+      success: true,
+      count: fetchedFiles.length,
+      owner,
+      repo,
+      branch,
+      activeFile: targetWs.activeFile,
+      commitSha: latestSha,
+      githubRepo: targetWs.githubRepo,
+    });
+  } catch (err) {
+    console.error("[github/pull] error:", err);
+    res.status(500).json({ error: err.message || "Failed to pull from GitHub." });
+  }
+});
+
+/**
+ * Export current workspace or active file as a GitHub Gist.
+ * POST /api/github/gist/export
+ * Body: { workspaceId, description, isPublic, token, activeOnly }
+ */
+app.post("/api/github/gist/export", async (req, res) => {
+  const { workspaceId, description, isPublic, token, activeOnly } = req.body;
+  let targetWs = null;
+  if (workspaceId && workspaces.has(workspaceId)) {
+    targetWs = workspaces.get(workspaceId);
+  } else {
+    for (const [, ws] of workspaces.entries()) {
+      targetWs = ws;
+      break;
+    }
+  }
+
+  if (!targetWs) {
+    return res.status(404).json({ error: "Workspace not found." });
+  }
+
+  if (targetWs.activeFile && targetWs.files.has(targetWs.activeFile)) {
+    targetWs.files.get(targetWs.activeFile).code = targetWs.code;
+  }
+
+  const gistFiles = {};
+  if (activeOnly && targetWs.activeFile) {
+    const filename = targetWs.activeFile.split("/").pop() || "code.txt";
+    gistFiles[filename] = { content: targetWs.code || "// empty file\n" };
+  } else if (targetWs.files.size > 0) {
+    for (const [path, obj] of targetWs.files.entries()) {
+      const safeName = path.replace(/\//g, "-");
+      gistFiles[safeName] = { content: obj.code || "// empty file\n" };
+    }
+  } else {
+    gistFiles["main.js"] = { content: targetWs.code || "// empty file\n" };
+  }
+
+  const headers = {
+    "User-Agent": "PairEditor-App",
+    "Accept": "application/vnd.github.v3+json",
+    "Content-Type": "application/json",
+  };
+  if (token && token.trim()) {
+    headers["Authorization"] = `Bearer ${token.trim()}`;
+  }
+
+  try {
+    const gistRes = await fetch("https://api.github.com/gists", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        description: description || "Created via PairEditor",
+        public: !!isPublic,
+        files: gistFiles,
+      }),
+    });
+
+    if (!gistRes.ok) {
+      const err = await gistRes.json().catch(() => ({}));
+      return res.status(gistRes.status).json({ error: err.message || "Failed to create GitHub Gist." });
+    }
+
+    const data = await gistRes.json();
+    res.json({
+      success: true,
+      gistId: data.id,
+      gistUrl: data.html_url,
+    });
+  } catch (err) {
+    console.error("[github/gist/export] error:", err);
+    res.status(500).json({ error: err.message || "Failed to export to GitHub Gist." });
+  }
+});
+
+/**
+ * Import files from a GitHub Gist into the workspace.
+ * POST /api/github/gist/import
+ * Body: { roomId, workspaceId, gistId, token }
+ */
+app.post("/api/github/gist/import", async (req, res) => {
+  const { roomId, workspaceId, gistId, token } = req.body;
+  if (!gistId || !gistId.trim()) {
+    return res.status(400).json({ error: "Gist ID or URL is required." });
+  }
+
+  const cleanId = gistId.trim().replace(/^https?:\/\/gist\.github\.com\/[^\/]+\//i, "").replace(/\/$/, "");
+
+  let targetWs = null;
+  if (workspaceId && workspaces.has(workspaceId)) {
+    targetWs = workspaces.get(workspaceId);
+  } else {
+    for (const [, ws] of workspaces.entries()) {
+      targetWs = ws;
+      break;
+    }
+  }
+  if (!targetWs) {
+    return res.status(404).json({ error: "Workspace not found." });
+  }
+
+  const headers = {
+    "User-Agent": "PairEditor-App",
+    "Accept": "application/vnd.github.v3+json",
+  };
+  if (token && token.trim()) {
+    headers["Authorization"] = `Bearer ${token.trim()}`;
+  }
+
+  try {
+    const gistRes = await fetch(`https://api.github.com/gists/${cleanId}`, { headers });
+    if (!gistRes.ok) {
+      if (gistRes.status === 404) return res.status(404).json({ error: `Gist '${cleanId}' not found.` });
+      return res.status(gistRes.status).json({ error: "Failed to fetch GitHub Gist." });
+    }
+    const gistData = await gistRes.json();
+    if (!gistData.files) {
+      return res.status(400).json({ error: "Gist has no files." });
+    }
+
+    targetWs.files = new Map();
+    const fileEntries = Object.entries(gistData.files);
+    fileEntries.forEach(([filename, fileObj]) => {
+      const content = fileObj.content || "";
+      targetWs.files.set(filename, {
+        code: content,
+        language: guessLanguageFromPath(filename),
+        originalCode: content,
+      });
+    });
+
+    targetWs.activeFile = fileEntries[0][0];
+    const activeObj = targetWs.files.get(targetWs.activeFile);
+    targetWs.code = activeObj.code;
+    targetWs.language = activeObj.language;
+    targetWs.lineAuthors = new Map();
+
+    io.to(`ws:${targetWs.id}`).emit("files-update", {
+      files: fileListFor(targetWs),
+      activeFile: targetWs.activeFile,
+    });
+    io.to(`ws:${targetWs.id}`).emit("active-file-changed", {
+      path: targetWs.activeFile,
+      code: targetWs.code,
+      language: targetWs.language,
+      originalCode: activeObj.originalCode ?? null,
+      lineAuthors: {},
+    });
+
+    if (roomId) {
+      io.to(roomId).emit("chat-message", {
+        id: uuidv4(),
+        userId: "system",
+        userName: "GitHub",
+        color: "#6FE3A6",
+        message: `📋 Imported Gist (${fileEntries.length} files) from ${gistData.html_url}`,
+        timestamp: Date.now(),
+      });
+    }
+
+    res.json({
+      success: true,
+      count: fileEntries.length,
+      gistUrl: gistData.html_url,
+    });
+  } catch (err) {
+    console.error("[github/gist/import] error:", err);
+    res.status(500).json({ error: err.message || "Failed to import GitHub Gist." });
+  }
 });
 
 // ── Socket.IO events ─────────────────────────────────────────────────────────
@@ -788,6 +1672,7 @@ io.on("connection", (socket) => {
         path: ws.activeFile,
         code: ws.code,
         language: ws.language,
+        originalCode: existing.originalCode ?? null,
         lineAuthors: Object.fromEntries(ws.lineAuthors),
       });
       return;
@@ -805,6 +1690,7 @@ io.on("connection", (socket) => {
       path: ws.activeFile,
       code: ws.code,
       language: ws.language,
+      originalCode: null,
       lineAuthors: {},
     });
   });
@@ -845,6 +1731,7 @@ io.on("connection", (socket) => {
         path: ws.activeFile,
         code: ws.code,
         language: ws.language,
+        originalCode: fileEntry.originalCode ?? null,
         lineAuthors: Object.fromEntries(ws.lineAuthors),
       });
     }
@@ -954,6 +1841,7 @@ io.on("connection", (socket) => {
       path,
       code: ws.code,
       language: ws.language,
+      originalCode: active.originalCode ?? null,
       lineAuthors: Object.fromEntries(ws.lineAuthors),
     });
   });

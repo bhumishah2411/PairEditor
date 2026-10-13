@@ -25,6 +25,7 @@ export default function Sidebar({
   onRenameFile,
   onDeleteFile,
   onSelectFile,
+  onOpenGitHubModal,
 }) {
   return (
     <div className="w-64 shrink-0 flex flex-col bg-panel border-r border-line overflow-hidden">
@@ -39,6 +40,7 @@ export default function Sidebar({
           onRenameFile={onRenameFile}
           onDeleteFile={onDeleteFile}
           onSelectFile={onSelectFile}
+          onOpenGitHubModal={onOpenGitHubModal}
         />
       </div>
 
