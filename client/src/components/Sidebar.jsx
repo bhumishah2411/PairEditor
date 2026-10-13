@@ -1,22 +1,23 @@
-/**
- * Sidebar – left panel:
- *   - Uploaded file tree on top
- *   - Team presence list below with personal/session indicators and collaborate/invite buttons
- */
-import { motion, AnimatePresence } from "framer-motion";
-import { UserPlus, Check, Users, LogOut, X } from "lucide-react";
+import { useState } from "react";
+import { Users, Activity } from "lucide-react";
 import FileExplorer from "./FileExplorer";
+
+function formatActivityTime(timestamp) {
+  if (!timestamp) return "";
+  const sec = Math.floor((Date.now() - timestamp) / 1000);
+  if (sec < 60) return "now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  return `${Math.floor(hr / 24)}d`;
+}
 
 export default function Sidebar({
   teamUsers = [],
   typingUsers,
   currentUserId,
-  workspaceType = "personal",
-  sessionId = null,
-  outgoingRequests = new Set(),
-  onSendCollabRequest,
-  onCancelCollabRequest,
-  onOpenLeaveModal,
+  activities = [],
   files,
   activeFile,
   isUploading,
@@ -27,9 +28,11 @@ export default function Sidebar({
   onSelectFile,
   onOpenGitHubModal,
 }) {
+  const [activeTab, setActiveTab] = useState("team"); // "team" | "activity"
+
   return (
     <div className="w-64 shrink-0 flex flex-col bg-panel border-r border-line overflow-hidden">
-      {/* Files section — flexible, takes remaining space */}
+      {/* Files section */}
       <div className="flex-1 min-h-0 flex flex-col">
         <FileExplorer
           files={files}
@@ -44,142 +47,115 @@ export default function Sidebar({
         />
       </div>
 
-      {/* Team presence & collaboration section */}
-      <div className="shrink-0 max-h-[50%] flex flex-col border-t border-line">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-line shrink-0">
-          <span className="font-mono text-[11px] text-paper-faint">$ team members</span>
-          <span className="ml-auto font-mono text-[11px] font-semibold text-signal bg-signal/10 px-2 py-0.5 rounded">
-            {teamUsers.length}
-          </span>
+      {/* Bottom section: Team Members & Activity Feed */}
+      <div className="shrink-0 h-64 flex flex-col border-t border-line bg-panel-sunken/30">
+        {/* Tab switch header */}
+        <div className="flex items-center px-2 py-2 border-b border-line shrink-0 gap-1 bg-panel">
+          <button
+            onClick={() => setActiveTab("team")}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium transition-colors ${
+              activeTab === "team"
+                ? "bg-panel-raised text-signal font-semibold border border-line"
+                : "text-paper-muted hover:text-paper"
+            }`}
+          >
+            <Users size={12} />
+            <span>members</span>
+            <span className="text-[10px] bg-panel px-1 py-0.2 rounded text-paper-faint">
+              {teamUsers.length}
+            </span>
+          </button>
+          <button
+            onClick={() => setActiveTab("activity")}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium transition-colors ${
+              activeTab === "activity"
+                ? "bg-panel-raised text-signal font-semibold border border-line"
+                : "text-paper-muted hover:text-paper"
+            }`}
+          >
+            <Activity size={12} />
+            <span>activity</span>
+            {activities.length > 0 && (
+              <span className="text-[10px] bg-panel px-1 py-0.2 rounded text-paper-faint">
+                {activities.length > 50 ? "50+" : activities.length}
+              </span>
+            )}
+          </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
-          <AnimatePresence>
-            {teamUsers.map((user) => {
-              const isTyping   = typingUsers?.has(user.id);
-              const isMe       = user.id === currentUserId;
-              const inMySession =
-                workspaceType === "session" &&
-                sessionId &&
-                user.sessionId === sessionId;
-              const isPending  = outgoingRequests?.has(user.id);
+        {/* Tab Content */}
+        <div className="flex-1 overflow-y-auto p-2">
+          {activeTab === "team" ? (
+            <div className="space-y-1">
+              {teamUsers.map((user) => {
+                const isTyping = typingUsers?.has(user.id);
+                const isMe = user.id === currentUserId;
 
-              return (
-                <motion.div
-                  key={user.id}
-                  initial={{ opacity: 0, x: -8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: -8 }}
-                  transition={{ duration: 0.2 }}
-                  className="flex items-center gap-2.5 px-2.5 py-2 rounded border-l-2 bg-panel-raised/30 hover:bg-panel-raised/70 transition-colors"
-                  style={{ borderColor: user.color }}
-                >
-                  {/* Square block avatar with user color */}
+                return (
                   <div
-                    className="w-6 h-6 rounded flex items-center justify-center text-[11px] font-mono font-bold shrink-0"
-                    style={{ backgroundColor: user.color + "22", color: user.color }}
+                    key={user.id}
+                    className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-panel-raised/50 transition-colors"
                   >
-                    {user.name.charAt(0).toUpperCase()}
-                  </div>
+                    {/* Avatar */}
+                    <div
+                      className="w-5.5 h-5.5 rounded flex items-center justify-center text-[10px] font-mono font-bold shrink-0"
+                      style={{ backgroundColor: user.color + "22", color: user.color }}
+                    >
+                      {user.name.charAt(0).toUpperCase()}
+                    </div>
 
-                  {/* Name + Status */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs text-paper font-medium truncate max-w-[80px]">
+                    {/* Name */}
+                    <div className="flex-1 min-w-0 flex items-center gap-1.5">
+                      <span className="text-xs text-paper font-medium truncate">
                         {user.name}
                       </span>
-                      {isMe ? (
-                        <span className="font-mono text-[10px] text-paper-faint">you</span>
-                      ) : (
-                        <span
-                          className={`font-mono text-[9px] px-1 py-0.2 rounded border ${
-                            user.workspaceType === "session"
-                              ? "bg-signal/10 text-signal border-signal/20"
-                              : "bg-panel-raised text-paper-muted border-line"
-                          }`}
-                        >
-                          {user.workspaceType === "session" ? "in session" : "solo"}
+                      {isMe && (
+                        <span className="font-mono text-[9px] text-paper-faint px-1 rounded bg-panel-raised">
+                          you
                         </span>
+                      )}
+                      {isTyping && (
+                        <div className="flex items-center gap-0.5 ml-auto">
+                          <span className="typing-dot" style={{ backgroundColor: user.color }} />
+                          <span className="typing-dot" style={{ backgroundColor: user.color }} />
+                          <span className="typing-dot" style={{ backgroundColor: user.color }} />
+                        </div>
                       )}
                     </div>
 
-                    {isTyping && (
-                      <div className="flex items-center gap-0.5 mt-0.5">
-                        <span className="typing-dot" style={{ backgroundColor: user.color }} />
-                        <span className="typing-dot" style={{ backgroundColor: user.color }} />
-                        <span className="typing-dot" style={{ backgroundColor: user.color }} />
-                        <span className="font-mono text-[9px] text-paper-faint ml-1">typing</span>
-                      </div>
-                    )}
+                    {/* Online dot */}
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" title="Online" />
                   </div>
-
-                  {/* Collaboration action button */}
-                  <div className="shrink-0">
-                    {isMe ? (
-                      workspaceType === "session" ? (
-                        <button
-                          onClick={onOpenLeaveModal}
-                          id="btn-sidebar-leave-session"
-                          className="flex items-center gap-1 font-mono text-[10px] text-danger hover:bg-danger/20 bg-danger/10 px-2 py-0.5 rounded border border-danger/30 transition-colors font-semibold"
-                          title="Leave this session and work separately"
-                        >
-                          <LogOut size={10} />
-                          <span>leave</span>
-                        </button>
-                      ) : (
-                        <span className="w-1.5 h-1.5 rounded-full bg-signal inline-block" />
-                      )
-                    ) : inMySession ? (
-                      <span
-                        className="inline-flex items-center gap-1 font-mono text-[10px] text-signal font-medium bg-signal/10 px-1.5 py-0.5 rounded border border-signal/20"
-                        title="Already collaborating in your session"
-                      >
-                        <Check size={10} />
-                        <span>synced</span>
-                      </span>
-                    ) : isPending ? (
-                      <div className="flex items-center gap-1">
-                        <span className="font-mono text-[10px] text-paper-faint bg-panel-raised px-1.5 py-0.5 rounded border border-line">
-                          sent…
-                        </span>
-                        {onCancelCollabRequest && (
-                          <button
-                            onClick={() => onCancelCollabRequest(user.id)}
-                            className="w-4 h-4 flex items-center justify-center rounded hover:bg-danger/20 text-paper-faint hover:text-danger transition-colors"
-                            title="Cancel collaboration request"
-                          >
-                            <X size={10} />
-                          </button>
-                        )}
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => onSendCollabRequest(user.id)}
-                        className="btn-signal flex items-center gap-1 px-2 py-0.5 rounded bg-signal/15 hover:bg-signal text-signal hover:text-canvas text-[10px] font-mono font-medium transition-all border border-signal/30"
-                        title={
-                          workspaceType === "session"
-                            ? `Invite ${user.name} to this session`
-                            : `Request to collaborate with ${user.name}`
-                        }
-                      >
-                        {workspaceType === "session" ? (
-                          <>
-                            <UserPlus size={10} />
-                            <span>invite</span>
-                          </>
-                        ) : (
-                          <>
-                            <Users size={10} />
-                            <span>collab</span>
-                          </>
-                        )}
-                      </button>
-                    )}
+                );
+              })}
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {activities.length === 0 ? (
+                <div className="text-center py-6 text-paper-faint text-xs font-mono">
+                  No recent activity
+                </div>
+              ) : (
+                activities.slice(0, 50).map((act) => (
+                  <div
+                    key={act.id}
+                    className="flex items-start gap-1.5 text-[11px] font-mono text-paper-muted leading-tight py-1 px-1.5 rounded hover:bg-panel-raised/40 transition-colors"
+                  >
+                    <span
+                      className="w-1.5 h-1.5 rounded-full shrink-0 mt-1"
+                      style={{ backgroundColor: act.color || "#6FE3A6" }}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <span className="text-paper">{act.text}</span>
+                    </div>
+                    <span className="text-[9px] text-paper-faint shrink-0 ml-1">
+                      {formatActivityTime(act.timestamp)}
+                    </span>
                   </div>
-                </motion.div>
-              );
-            })}
-          </AnimatePresence>
+                ))
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

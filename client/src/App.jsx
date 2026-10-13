@@ -3,9 +3,7 @@
  *
  * State machine:
  *  "landing"  → user fills in name + room ID
- *  "editor"   → full workspace is shown (personal or collaborative session)
- *
- * URL param ?room=<id> pre-fills the room ID so sharing a link works.
+ *  "editor"   → full shared room workspace is shown
  */
 import { useState, useEffect, useRef } from "react";
 import { AnimatePresence } from "framer-motion";
@@ -16,15 +14,13 @@ import { useSocket }        from "./hooks/useSocket";
 import { useCollaboration } from "./hooks/useCollaboration";
 import { runCode }          from "./utils/codeRunner";
 
-import RoomJoin       from "./components/RoomJoin";
-import Toolbar        from "./components/Toolbar";
-import Sidebar        from "./components/Sidebar";
-import Editor         from "./components/Editor";
-import Whiteboard     from "./components/Whiteboard";
-import ChatPanel      from "./components/ChatPanel";
-import OutputPanel    from "./components/OutputPanel";
-import CollabRequests from "./components/CollabRequests";
-import LeaveConfirmModal from "./components/LeaveConfirmModal";
+import RoomJoin    from "./components/RoomJoin";
+import Toolbar     from "./components/Toolbar";
+import Sidebar     from "./components/Sidebar";
+import Editor      from "./components/Editor";
+import Whiteboard  from "./components/Whiteboard";
+import ChatPanel   from "./components/ChatPanel";
+import OutputPanel from "./components/OutputPanel";
 import GitHubModal from "./components/GitHubModal";
 
 export default function App() {
@@ -43,26 +39,31 @@ export default function App() {
   // ── Socket ───────────────────────────────────────────────────────────────
   const { socket, connected } = useSocket();
 
-  // ── Collaboration & Workspace ─────────────────────────────────────────────
+  // ── Collaboration & Shared Workspace ─────────────────────────────────────
   const {
     code,
     originalCode,
     language,
     users,
     teamUsers,
-    workspaceType,
-    workspaceId,
-    sessionId,
-    sessionMembers,
     githubRepo,
-    incomingRequests,
-    outgoingRequests,
     remoteCursors,
     typingUsers,
     chatMessages,
     lineAuthors,
     files,
     activeFile,
+    activeLock,
+    isLockedByMe,
+    isLockedByOther,
+    isUnlocked,
+    acquireLock,
+    releaseLock,
+    requestLock,
+    respondToLockRequest,
+    lockRequests,
+    lockExpiringWarning,
+    activities,
     isUploading,
     viewMode,
     switchViewMode,
@@ -83,10 +84,6 @@ export default function App() {
     handleWhiteboardDrawStep,
     handleWhiteboardCursor,
     handleWhiteboardClear,
-    sendCollabRequest,
-    cancelCollabRequest,
-    respondToRequest,
-    leaveSession,
   } = useCollaboration({
     socket,
     roomId:   session?.roomId,
@@ -94,23 +91,13 @@ export default function App() {
   });
 
   // ── UI state ──────────────────────────────────────────────────────────────
-  const [showChat,       setShowChat]       = useState(false);
-  const [showOutput,     setShowOutput]     = useState(false);
-  const [output,         setOutput]         = useState(null);
-  const [isRunning,      setIsRunning]      = useState(false);
-  const [showLeaveModal,  setShowLeaveModal]  = useState(false);
-  const [isLeaving,       setIsLeaving]       = useState(false);
+  const [showChat,        setShowChat]        = useState(false);
+  const [showOutput,      setShowOutput]      = useState(false);
+  const [output,          setOutput]          = useState(null);
+  const [isRunning,       setIsRunning]       = useState(false);
   const [showGitHubModal, setShowGitHubModal] = useState(false);
 
-  const handleConfirmLeave = () => {
-    if (isLeaving) return;
-    setIsLeaving(true);
-    leaveSession();
-    setShowLeaveModal(false);
-    setIsLeaving(false);
-  };
-
-  // ── Toasts for team room & session events ─────────────────────────────────
+  // ── Toasts for important events only ─────────────────────────────────────
   useEffect(() => {
     if (!session || !socket) return;
 
@@ -128,79 +115,68 @@ export default function App() {
       if (user) toast(`${user.name} left`, { icon: "👋", style: toastStyle });
     };
 
-    const onSessionMemberJoined = ({ member }) => {
-      if (member.id !== socket.id) {
-        toast.success(`${member.name} joined your session!`, {
-          icon: "🤝",
-          style: toastStyle,
-        });
-      }
-    };
-
-    const onSessionMemberLeft = ({ userName }) => {
-      toast(`${userName || "A member"} left the session`, {
-        icon: "👋",
+    const onLockDenied = ({ path, ownerName }) => {
+      toast(`"${path}" is currently locked by ${ownerName}`, {
+        icon: "🔒",
         style: toastStyle,
       });
     };
 
-    const onSessionEnded = ({ message }) => {
-      toast(message || "Session ended, you are now working solo", {
-        icon: "ℹ️",
+    const onLockGranted = ({ path }) => {
+      toast.success(`You acquired edit lock for "${path}"`, {
+        icon: "✏️",
         style: toastStyle,
       });
     };
 
-    let lastDeclinedUserId = null;
-    const onCollabDeclined = ({ byUserId, byName, reason }) => {
-      lastDeclinedUserId = byUserId;
-      toast.error(`${byName || "Peer"} declined your request${reason ? ` (${reason})` : ""}`, {
-        style: toastStyle,
-      });
-    };
-
-    const onCollabRequestSent = () => {
-      toast.success("Collaboration request sent", {
+    const onLockRequestSent = ({ path }) => {
+      toast.success(`Edit access requested for "${path}"`, {
         icon: "📨",
         style: toastStyle,
       });
     };
 
-    const onCollabRequestResolved = ({ toUserId, status }) => {
-      if (status === "expired") {
-        toast("Collaboration request expired (no response)", {
-          icon: "⏱️",
-          style: toastStyle,
-        });
-      } else if (status === "declined") {
-        if (lastDeclinedUserId !== toUserId) {
-          const user = teamUsers.find((u) => u.id === toUserId);
-          toast.error(`${user?.name || "Peer"} declined your request`, {
-            style: toastStyle,
-          });
-        }
-        lastDeclinedUserId = null;
-      }
+    const onLockRequestDeclined = ({ path, byUserName }) => {
+      toast.error(`${byUserName} declined your edit request for "${path}"`, {
+        style: toastStyle,
+      });
+    };
+
+    const onLockTransferred = ({ path, toUserName }) => {
+      toast(`Edit access for "${path}" transferred to ${toUserName}`, {
+        icon: "🤝",
+        style: toastStyle,
+      });
+    };
+
+    const onOpBlocked = ({ message }) => {
+      toast.error(message, { style: toastStyle });
+    };
+
+    const onEditRejected = ({ reason }) => {
+      toast.error(reason || "Edit rejected (file is read-only)", { style: toastStyle });
     };
 
     socket.on("user-joined", joined);
     socket.on("user-left", left);
-    socket.on("session-member-joined", onSessionMemberJoined);
-    socket.on("session-member-left", onSessionMemberLeft);
-    socket.on("session-ended", onSessionEnded);
-    socket.on("collab-declined", onCollabDeclined);
-    socket.on("collab-request-sent", onCollabRequestSent);
-    socket.on("collab-request-resolved", onCollabRequestResolved);
+    socket.on("file-lock-denied", onLockDenied);
+    socket.on("file-lock-granted", onLockGranted);
+    socket.on("file-lock-request-sent", onLockRequestSent);
+    socket.on("file-lock-request-declined", onLockRequestDeclined);
+    socket.on("file-lock-transferred", onLockTransferred);
+    socket.on("file-operation-blocked", onOpBlocked);
+    socket.on("file-edit-rejected", onEditRejected);
 
     return () => {
       socket.off("user-joined", joined);
       socket.off("user-left", left);
-      socket.off("session-member-joined", onSessionMemberJoined);
-      socket.off("session-member-left", onSessionMemberLeft);
-      socket.off("session-ended", onSessionEnded);
-      socket.off("collab-declined", onCollabDeclined);
-      socket.off("collab-request-sent", onCollabRequestSent);
-      socket.off("collab-request-resolved", onCollabRequestResolved);
+      socket.off("file-lock-denied", onLockDenied);
+      socket.off("file-lock-granted", onLockGranted);
+      socket.off("file-lock-request-sent", onLockRequestSent);
+      socket.off("file-lock-request-declined", onLockRequestDeclined);
+      socket.off("file-lock-transferred", onLockTransferred);
+      socket.off("file-operation-blocked", onOpBlocked);
+      socket.off("file-edit-rejected", onEditRejected);
     };
   }, [socket, session, teamUsers]);
 
@@ -226,13 +202,8 @@ export default function App() {
     window.history.replaceState({}, "", `?room=${roomId}`);
   };
 
-  const currentUser =
-    teamUsers.find((u) => u.id === socket?.id) ||
-    users.find((u) => u.id === socket?.id);
+  const currentUser = teamUsers.find((u) => u.id === socket?.id);
 
-  /**
-   * Stable ref always holding the local user's author info.
-   */
   const localAuthorRef = useRef(null);
   useEffect(() => {
     const me = teamUsers.find((u) => u.id === socket?.id);
@@ -247,9 +218,6 @@ export default function App() {
     }
   }, [teamUsers, socket, session]);
 
-  /**
-   * Called by Editor when the local user touches specific line numbers.
-   */
   const handleLinesEdited = (changedLines) => {
     if (!localAuthorRef.current && session) {
       localAuthorRef.current = {
@@ -262,31 +230,68 @@ export default function App() {
     emitLineAuthors(changedLines, localAuthorRef.current);
   };
 
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <>
       <Toaster position="top-right" />
 
-      {/* Floating incoming collaboration request popups */}
-      <CollabRequests
-        requests={incomingRequests}
-        onRespond={respondToRequest}
-      />
+      {/* ── Lock Expiring Warning Banner ── */}
+      {lockExpiringWarning && (
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 bg-amber-500/15 border border-amber-500/40 text-amber-300 px-4 py-2 rounded-lg font-mono text-xs shadow-2xl flex items-center gap-2.5 backdrop-blur-md animate-pulse">
+          <span className="w-2 h-2 rounded-full bg-amber-400" />
+          <span>
+            Your lock on <strong>{lockExpiringWarning.path}</strong> expires in {lockExpiringWarning.remainingSeconds}s. Type to keep editing.
+          </span>
+        </div>
+      )}
 
-      {/* Leave session confirmation dialog */}
-      <LeaveConfirmModal
-        isOpen={showLeaveModal}
-        onClose={() => setShowLeaveModal(false)}
-        onConfirm={handleConfirmLeave}
-        isLeaving={isLeaving}
-      />
+      {/* ── Floating Incoming Edit Access Requests ── */}
+      {lockRequests.length > 0 && (
+        <div className="fixed top-14 right-5 z-50 flex flex-col gap-2 max-w-sm w-full">
+          {lockRequests.map((req) => (
+            <div
+              key={`${req.path}:${req.fromUserId}`}
+              className="bg-panel/95 backdrop-blur-md border border-line p-3 rounded-lg shadow-2xl flex flex-col gap-2 border-l-4"
+              style={{ borderLeftColor: req.fromColor || "#6FE3A6" }}
+            >
+              <div className="flex items-center gap-2 text-xs">
+                <span
+                  className="w-5 h-5 rounded flex items-center justify-center font-mono font-bold text-[10px] shrink-0"
+                  style={{
+                    backgroundColor: (req.fromColor || "#6FE3A6") + "22",
+                    color: req.fromColor || "#6FE3A6",
+                  }}
+                >
+                  {req.fromUserName?.charAt(0).toUpperCase()}
+                </span>
+                <span className="text-paper">
+                  <strong>{req.fromUserName}</strong> requested edit access for{" "}
+                  <strong className="text-signal">{req.path}</strong>
+                </span>
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-1 border-t border-line/40">
+                <button
+                  onClick={() => respondToLockRequest(req.path, req.fromUserId, false)}
+                  className="px-2.5 py-1 rounded bg-panel-raised hover:bg-danger/10 hover:text-danger text-paper-muted text-xs font-mono transition-colors"
+                >
+                  Decline
+                </button>
+                <button
+                  onClick={() => respondToLockRequest(req.path, req.fromUserId, true)}
+                  className="btn-signal px-3 py-1 rounded bg-signal text-canvas font-semibold text-xs font-mono shadow-sm transition-all"
+                >
+                  Grant access
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
-      {/* GitHub Integration Modal */}
+      {/* ── GitHub Modal ── */}
       <GitHubModal
         isOpen={showGitHubModal}
         onClose={() => setShowGitHubModal(false)}
         roomId={session?.roomId}
-        workspaceId={workspaceId}
         currentRepo={githubRepo}
         filesCount={files.length || (code ? 1 : 0)}
         currentUser={currentUser}
@@ -308,10 +313,6 @@ export default function App() {
               {/* ── Top toolbar ── */}
               <Toolbar
                 roomId={session.roomId}
-                workspaceType={workspaceType}
-                workspaceId={workspaceId}
-                sessionMembers={sessionMembers}
-                onLeaveSession={() => setShowLeaveModal(true)}
                 language={language}
                 connected={connected}
                 isDark={isDark}
@@ -330,17 +331,12 @@ export default function App() {
 
               {/* ── Main area ── */}
               <div className="flex flex-1 min-h-0">
-                {/* Team members & files sidebar */}
+                {/* Team members, files & activity sidebar */}
                 <Sidebar
                   teamUsers={teamUsers}
                   typingUsers={typingUsers}
                   currentUserId={socket?.id}
-                  workspaceType={workspaceType}
-                  sessionId={sessionId}
-                  outgoingRequests={outgoingRequests}
-                  onSendCollabRequest={sendCollabRequest}
-                  onCancelCollabRequest={cancelCollabRequest}
-                  onOpenLeaveModal={() => setShowLeaveModal(true)}
+                  activities={activities}
                   files={files}
                   activeFile={activeFile}
                   isUploading={isUploading}
@@ -375,6 +371,14 @@ export default function App() {
                     onChange={handleCodeChange}
                     onCursorChange={handleCursorChange}
                     onLinesEdited={handleLinesEdited}
+                    activeFile={activeFile}
+                    isLockedByMe={isLockedByMe}
+                    isLockedByOther={isLockedByOther}
+                    isUnlocked={isUnlocked}
+                    lockOwner={activeLock}
+                    onAcquireLock={acquireLock}
+                    onReleaseLock={releaseLock}
+                    onRequestLock={requestLock}
                   />
 
                   {/* Output panel (animated slide-up) */}
@@ -430,7 +434,7 @@ export default function App() {
               <button
                 id="btn-toggle-chat"
                 onClick={() => setShowChat((v) => !v)}
-                className="btn-signal fixed bottom-5 right-5 w-12 h-12 flex items-center justify-center rounded-lg bg-signal shadow-lg transition-all z-50"
+                className="btn-signal fixed bottom-5 right-5 w-12 h-12 flex items-center justify-center rounded-lg bg-signal shadow-lg transition-all z-40"
                 title="Toggle chat"
               >
                 <MessageSquare size={20} className="text-canvas" />

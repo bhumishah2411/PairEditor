@@ -4,8 +4,7 @@
  * (everyone in the room follows, same as the rest of this app's model).
  */
 import { useState, useRef, useCallback } from "react";
-import { motion } from "framer-motion";
-import { Folder, FolderOpen, FileCode, ChevronRight, FolderUp, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Folder, FolderOpen, FileCode, ChevronRight, FolderUp, Loader2, Pencil, Plus, Trash2, Eye } from "lucide-react";
 import GithubIcon from "./GithubIcon";
 import { buildFileTree } from "../utils/fileTree";
 
@@ -227,7 +226,7 @@ function FolderRow({
         <span className="font-mono text-xs text-paper-muted truncate">{node.name}</span>
       </button>
       {isOpen && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.12 }}>
+        <div className="transition-opacity duration-100">
           <TreeNodes
             nodes={node.children}
             depth={depth + 1}
@@ -244,10 +243,21 @@ function FolderRow({
             onSelectFile={onSelectFile}
             onRenameFile={onRenameFile}
           />
-        </motion.div>
+        </div>
       )}
     </div>
   );
+}
+
+function formatTimeAgo(timestamp) {
+  if (!timestamp) return "";
+  const sec = Math.floor((Date.now() - timestamp) / 1000);
+  if (sec < 60) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
 }
 
 function FileRow({
@@ -262,7 +272,6 @@ function FileRow({
   onCommitRename,
   onDeleteFile,
   onSelectFile,
-  onRenameFile,
 }) {
   const handleDelete = (e) => {
     e.stopPropagation();
@@ -270,6 +279,18 @@ function FileRow({
     if (!confirmed) return;
     onDeleteFile?.(node.path);
   };
+
+  const tooltipParts = [node.path];
+  if (node.lock) {
+    tooltipParts.push(`Editing: ${node.lock.userName}`);
+  }
+  if (node.viewers && node.viewers.length > 0) {
+    tooltipParts.push(`Viewing: ${node.viewers.map((v) => v.name).join(", ")}`);
+  }
+  if (node.lastEditedBy) {
+    tooltipParts.push(`Last edited by ${node.lastEditedBy.name} ${formatTimeAgo(node.lastEditedBy.timestamp)}`);
+  }
+  const tooltipText = tooltipParts.join(" • ");
 
   if (isEditing) {
     return (
@@ -296,7 +317,7 @@ function FileRow({
         isActive ? "bg-signal/12 text-signal" : "text-paper-muted hover:bg-panel-raised/70 hover:text-paper"
       }`}
       style={{ paddingLeft: `${8 + depth * 14 + 14}px` }}
-      title={node.path}
+      title={tooltipText}
     >
       <button
         type="button"
@@ -305,9 +326,45 @@ function FileRow({
       >
         <FileCode size={13} className="shrink-0" />
         <span className="font-mono text-xs truncate">{node.name}</span>
+
+        {/* Lock owner initial badge */}
+        {node.lock && (
+          <span
+            className="w-3.5 h-3.5 rounded-full flex items-center justify-center text-[9px] font-mono font-bold shrink-0 text-canvas shadow-sm ml-auto mr-1"
+            style={{ backgroundColor: node.lock.color }}
+            title={`Editing: ${node.lock.userName}`}
+          >
+            {node.lock.userName.charAt(0).toUpperCase()}
+          </span>
+        )}
+
+        {/* Active viewers eye avatar indicators */}
+        {node.viewers && node.viewers.length > 0 && (
+          <div
+            className={`flex items-center -space-x-1 shrink-0 ${!node.lock ? "ml-auto" : ""} mr-1`}
+            title={`Viewing: ${node.viewers.map((v) => v.name).join(", ")}`}
+          >
+            <Eye size={11} className="text-paper-faint mr-1 shrink-0" />
+            {node.viewers.slice(0, 3).map((v) => (
+              <span
+                key={v.id}
+                className="w-3 h-3 rounded-full flex items-center justify-center text-[8px] font-mono font-bold text-canvas border border-canvas shrink-0"
+                style={{ backgroundColor: v.color }}
+              >
+                {v.name.charAt(0).toUpperCase()}
+              </span>
+            ))}
+            {node.viewers.length > 3 && (
+              <span className="text-[8px] font-mono text-paper-faint pl-1">
+                +{node.viewers.length - 3}
+              </span>
+            )}
+          </div>
+        )}
+
         {node.isModified && (
           <span
-            className="ml-auto mr-1 w-1.5 h-1.5 rounded-full bg-signal shrink-0"
+            className="mr-1 w-1.5 h-1.5 rounded-full bg-signal shrink-0"
             title="Modified from GitHub"
           />
         )}

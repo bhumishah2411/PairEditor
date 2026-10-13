@@ -56,7 +56,7 @@ export function buildFileTree(files) {
   const root = { type: "folder", name: "", path: "", children: new Map() };
 
   files.forEach((item) => {
-    const { path, language, isModified } = item;
+    const { path, language, isModified, lock, viewers, lastEditedBy } = item;
     const segments = path.split("/");
     let node = root;
     segments.forEach((segment, i) => {
@@ -64,7 +64,16 @@ export function buildFileTree(files) {
       const currentPath = segments.slice(0, i + 1).join("/");
       if (!node.children.has(segment)) {
         node.children.set(segment, isFile
-          ? { type: "file", name: segment, path: currentPath, language, isModified: Boolean(isModified) }
+          ? {
+              type: "file",
+              name: segment,
+              path: currentPath,
+              language,
+              isModified: Boolean(isModified),
+              lock: lock || null,
+              viewers: Array.isArray(viewers) ? viewers : [],
+              lastEditedBy: lastEditedBy || null,
+            }
           : { type: "folder", name: segment, path: currentPath, children: new Map() }
         );
       }
