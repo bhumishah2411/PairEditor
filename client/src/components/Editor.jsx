@@ -40,19 +40,34 @@ export default function Editor({
   const [diffStats, setDiffStats] = useState(null);
   const localChangeFlagRef = useRef(false); // true when current code change is local
 
+  // Stable refs for callbacks captured in one-time handleMount listeners
+  const onLinesEditedRef  = useRef(onLinesEdited);
+  const onCursorChangeRef = useRef(onCursorChange);
+  const onAcquireLockRef  = useRef(onAcquireLock);
+  const isUnlockedRef     = useRef(isUnlocked);
+  const activeFileRef     = useRef(activeFile);
+
+  // Keep refs in sync with latest props on every render
+  useEffect(() => { onLinesEditedRef.current  = onLinesEdited;  }, [onLinesEdited]);
+  useEffect(() => { onCursorChangeRef.current = onCursorChange; }, [onCursorChange]);
+  useEffect(() => { onAcquireLockRef.current  = onAcquireLock;  }, [onAcquireLock]);
+  useEffect(() => { isUnlockedRef.current     = isUnlocked;     }, [isUnlocked]);
+  useEffect(() => { activeFileRef.current     = activeFile;     }, [activeFile]);
+
   // ── Mount ──────────────────────────────────────────────────────────────────
   const handleMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
 
+    // Use refs so these listeners always call the latest prop values
     editor.onDidChangeCursorPosition((e) =>
-      onCursorChange({ lineNumber: e.position.lineNumber, column: e.position.column })
+      onCursorChangeRef.current?.({ lineNumber: e.position.lineNumber, column: e.position.column })
     );
 
     // If file is unlocked and user clicks into editor, automatically acquire lock
     editor.onMouseDown(() => {
-      if (isUnlocked && activeFile) {
-        onAcquireLock?.(activeFile);
+      if (isUnlockedRef.current && activeFileRef.current) {
+        onAcquireLockRef.current?.(activeFileRef.current);
       }
     });
 
@@ -69,7 +84,8 @@ export default function Editor({
           for (let i = 1; i <= n; i++) lines.add(range.startLineNumber + i);
         }
       });
-      if (lines.size) onLinesEdited([...lines]);
+      // Use ref so we always call the current handler (not the stale mount-time closure)
+      if (lines.size) onLinesEditedRef.current?.([...lines]);
     });
 
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {});
