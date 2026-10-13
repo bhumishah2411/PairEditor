@@ -422,7 +422,11 @@ export function useCollaboration({ socket, roomId, userName }) {
   // ── Team Chat ────────────────────────────────────────────────────────────
   const sendChatMessage = useCallback(
     (message) => {
-      socket?.emit("chat-message", { message });
+      if (typeof message === "object" && message !== null) {
+        socket?.emit("chat-message", message);
+      } else {
+        socket?.emit("chat-message", { message });
+      }
     },
     [socket]
   );
