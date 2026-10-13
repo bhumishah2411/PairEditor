@@ -5,17 +5,19 @@
  *  - Line-level authorship blame shown via a custom overlay positioned next to each line
  *  - Language-aware syntax highlighting + theme switching
  */
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useState } from "react";
 import MonacoEditor from "@monaco-editor/react";
 
 export default function Editor({
   code,
+  originalCode,
   language,
   isDark,
   users,
   remoteCursors,
   lineAuthors,
   currentUserId,
+  currentUser,
   onChange,
   onCursorChange,
   onLinesEdited,
@@ -24,6 +26,8 @@ export default function Editor({
   const monacoRef        = useRef(null);
   const blameDecoRef     = useRef([]);   // array of decoration IDs
   const cursorDecoRef    = useRef({});   // userId → decoration IDs
+  const diffDecoRef      = useRef([]);   // git diff decoration IDs
+  const [diffStats, setDiffStats] = useState(null);
   const localChangeFlagRef = useRef(false); // true when current code change is local
 
   // ── Mount ──────────────────────────────────────────────────────────────────
@@ -147,11 +151,109 @@ export default function Editor({
 
   useEffect(() => { updateCursors(); }, [updateCursors]);
 
+  // ── GitHub Line Diff decorations ──────────────────────────────────────────
+  const updateDiff = useCallback(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco) return;
+    const model = editor.getModel();
+    if (!model) return;
+
+    if (originalCode == null) {
+      diffDecoRef.current = editor.deltaDecorations(diffDecoRef.current, []);
+      setDiffStats(null);
+      return;
+    }
+
+    const diffs = computeLineDiff(originalCode, code);
+    const totalLines = model.getLineCount();
+
+    let addedCount = 0;
+    let modifiedCount = 0;
+    let deletedCount = 0;
+
+    const newDecos = diffs
+      .filter((d) => d.line >= 1 && d.line <= totalLines)
+      .map(({ line, type }) => {
+        if (type === "added") addedCount++;
+        else if (type === "modified") modifiedCount++;
+        else if (type === "deleted") deletedCount++;
+
+        const gutterClass =
+          type === "added"
+            ? "git-gutter-added"
+            : type === "modified"
+            ? "git-gutter-modified"
+            : "git-gutter-deleted";
+
+        const lineBgClass =
+          type === "added"
+            ? "git-line-added-bg"
+            : type === "modified"
+            ? "git-line-modified-bg"
+            : "git-line-deleted-bg";
+
+        const hoverText =
+          type === "added"
+            ? "**GitHub Diff**: Added line"
+            : type === "modified"
+            ? "**GitHub Diff**: Modified line (changed from GitHub)"
+            : "**GitHub Diff**: Line(s) deleted before this line";
+
+        return {
+          range: new monaco.Range(line, 1, line, 1),
+          options: {
+            isWholeLine: true,
+            linesDecorationsClassName: gutterClass,
+            className: lineBgClass,
+            hoverMessage: { value: hoverText },
+            stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+          },
+        };
+      });
+
+    diffDecoRef.current = editor.deltaDecorations(diffDecoRef.current, newDecos);
+    setDiffStats({
+      added: addedCount,
+      modified: modifiedCount,
+      deleted: deletedCount,
+      total: addedCount + modifiedCount + deletedCount,
+    });
+  }, [code, originalCode]);
+
+  useEffect(() => {
+    updateDiff();
+  }, [updateDiff]);
+
   // Distinct author colors currently present in the room — the signature stripe
   const gutterColors = [...new Set(users.map((u) => u.color))];
 
   return (
     <div className="flex-1 min-h-0 relative flex">
+      {/* GitHub line diff badge indicator */}
+      {originalCode != null && (
+        <div className="absolute top-2.5 right-6 z-20 pointer-events-none select-none flex items-center gap-1.5 px-2.5 py-1 rounded bg-panel/90 backdrop-blur border border-line text-[11px] font-mono shadow-sm">
+          <span className="w-1.5 h-1.5 rounded-full bg-signal shrink-0" />
+          <span className="text-paper-faint">GitHub:</span>
+          {diffStats && diffStats.total > 0 ? (
+            <>
+              {diffStats.added > 0 && (
+                <span className="text-emerald-400 font-semibold">+{diffStats.added}</span>
+              )}
+              {diffStats.modified > 0 && (
+                <span className="text-sky-400 font-semibold">~{diffStats.modified}</span>
+              )}
+              {diffStats.deleted > 0 && (
+                <span className="text-rose-400 font-semibold">-{diffStats.deleted}</span>
+              )}
+              <span className="text-paper-faint text-[10px]">changed</span>
+            </>
+          ) : (
+            <span className="text-paper-muted text-[10px]">clean (in sync)</span>
+          )}
+        </div>
+      )}
+
       {/* Author gutter — a live stripe of everyone present, the app's signature */}
       <div className="author-gutter">
         {(gutterColors.length ? gutterColors : ["#242B34"]).map((c, i) => (
@@ -247,4 +349,75 @@ function ensureCursorStyle(scopeKey, color) {
     }
   `;
   document.head.appendChild(s);
+}
+
+/**
+ * Compute line differences between originalCode (from GitHub) and current code.
+ * Returns array of { line: number, type: 'added' | 'modified' | 'deleted' }
+ */
+function computeLineDiff(originalText, currentText) {
+  if (originalText == null) return [];
+  if (originalText === currentText) return [];
+
+  const orig = originalText.split("\n");
+  const curr = currentText.split("\n");
+  const m = orig.length;
+  const n = curr.length;
+
+  if (m * n > 2500000) {
+    const res = [];
+    for (let i = 0; i < n; i++) {
+      if (i >= m) res.push({ line: i + 1, type: "added" });
+      else if (orig[i] !== curr[i]) res.push({ line: i + 1, type: "modified" });
+    }
+    return res;
+  }
+
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (orig[i - 1] === curr[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  let i = m;
+  let j = n;
+  const diffMap = new Map();
+
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && orig[i - 1] === curr[j - 1]) {
+      i--;
+      j--;
+    } else {
+      const hunkAdds = [];
+      const hunkDels = [];
+      while ((i > 0 || j > 0) && !(i > 0 && j > 0 && orig[i - 1] === curr[j - 1])) {
+        if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+          hunkAdds.push(j);
+          j--;
+        } else {
+          hunkDels.push(i);
+          i--;
+        }
+      }
+      if (hunkAdds.length > 0 && hunkDels.length > 0) {
+        hunkAdds.forEach((line) => diffMap.set(line, "modified"));
+      } else if (hunkAdds.length > 0) {
+        hunkAdds.forEach((line) => diffMap.set(line, "added"));
+      } else if (hunkDels.length > 0) {
+        const anchor = Math.max(1, Math.min(n, j + 1));
+        if (!diffMap.has(anchor)) {
+          diffMap.set(anchor, "deleted");
+        }
+      }
+    }
+  }
+
+  return [...diffMap.entries()]
+    .map(([line, type]) => ({ line, type }))
+    .sort((a, b) => a.line - b.line);
 }

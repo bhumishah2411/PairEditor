@@ -6,9 +6,10 @@
 import { useState, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Folder, FolderOpen, FileCode, ChevronRight, FolderUp, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import GithubIcon from "./GithubIcon";
 import { buildFileTree } from "../utils/fileTree";
 
-export default function FileExplorer({ files, activeFile, isUploading, onUploadFolder, onCreateFile, onRenameFile, onDeleteFile, onSelectFile }) {
+export default function FileExplorer({ files, activeFile, isUploading, onUploadFolder, onCreateFile, onRenameFile, onDeleteFile, onSelectFile, onOpenGitHubModal }) {
   const inputRef = useRef(null);
   const [expanded, setExpanded] = useState(new Set());
   const [editingPath, setEditingPath] = useState(null);
@@ -87,6 +88,14 @@ export default function FileExplorer({ files, activeFile, isUploading, onUploadF
           {isUploading ? <Loader2 size={11} className="animate-spin" /> : <FolderUp size={11} />}
           {isUploading ? "reading…" : "upload"}
         </button>
+        <button
+          type="button"
+          onClick={onOpenGitHubModal}
+          title="Import or Push to GitHub"
+          className="flex items-center gap-1 font-mono text-[10px] text-paper-muted hover:text-signal border border-line hover:border-signal/40 rounded px-1.5 py-0.5 transition-colors whitespace-nowrap"
+        >
+          <GithubIcon size={11} />
+        </button>
         <input
           ref={inputRef}
           type="file"
@@ -101,11 +110,20 @@ export default function FileExplorer({ files, activeFile, isUploading, onUploadF
       {/* Tree */}
       <div className="flex-1 overflow-y-auto p-1.5">
         {tree.length === 0 ? (
-          <p className="font-mono text-[11px] text-paper-faint text-center px-3 py-6 leading-relaxed">
-            no folder loaded.
-            <br />
-            click <span className="text-signal">upload</span> to bring in a project.
-          </p>
+          <div className="font-mono text-[11px] text-paper-faint text-center px-3 py-6 leading-relaxed flex flex-col items-center">
+            <span>no folder loaded.</span>
+            <span className="mt-1">
+              click <span className="text-signal">upload</span> or
+            </span>
+            <button
+              type="button"
+              onClick={onOpenGitHubModal}
+              className="mt-2.5 text-[11px] font-mono text-paper-muted hover:text-signal flex items-center gap-1.5 px-2.5 py-1 rounded bg-panel-raised border border-line hover:border-signal/40 transition-colors"
+            >
+              <GithubIcon size={12} className="text-signal" />
+              <span>import from GitHub</span>
+            </button>
+          </div>
         ) : (
           <TreeNodes
             nodes={tree}
@@ -287,6 +305,12 @@ function FileRow({
       >
         <FileCode size={13} className="shrink-0" />
         <span className="font-mono text-xs truncate">{node.name}</span>
+        {node.isModified && (
+          <span
+            className="ml-auto mr-1 w-1.5 h-1.5 rounded-full bg-signal shrink-0"
+            title="Modified from GitHub"
+          />
+        )}
       </button>
 
       <div className="mr-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">

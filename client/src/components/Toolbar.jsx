@@ -4,6 +4,7 @@ import {
   Play, Copy, Check, Sun, Moon, ChevronDown, Loader2, Download,
   Code2, Columns, Presentation, Lock, Users, LogOut,
 } from "lucide-react";
+import GithubIcon from "./GithubIcon";
 import { LANGUAGES } from "../utils/constants";
 import ConnectionStatus from "./ConnectionStatus";
 
@@ -23,6 +24,8 @@ export default function Toolbar({
   viewMode = "code",
   onViewModeChange,
   whiteboardElementsCount = 0,
+  githubRepo = null,
+  onOpenGitHubModal,
   onToggleTheme,
   onLanguageChange,
   onRun,
@@ -230,6 +233,27 @@ export default function Toolbar({
         >
           {isRunning ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
           {isRunning ? "running…" : "run"}
+        </button>
+
+        {/* GitHub Integration Modal trigger */}
+        <button
+          id="btn-github-sync"
+          onClick={onOpenGitHubModal}
+          title={
+            githubRepo
+              ? `GitHub: ${githubRepo.owner}/${githubRepo.repo}@${githubRepo.branch}`
+              : "GitHub Sync (Import, Pull, Push)"
+          }
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-panel-raised border border-line text-xs font-mono text-paper-muted hover:text-paper hover:border-signal/40 transition-colors"
+        >
+          <GithubIcon size={13} className={githubRepo ? "text-signal" : "text-paper-muted"} />
+          <span className="hidden sm:inline">github</span>
+          {githubRepo && (
+            <span
+              className="w-1.5 h-1.5 rounded-full bg-signal inline-block"
+              title={`Linked to ${githubRepo.owner}/${githubRepo.repo}`}
+            />
+          )}
         </button>
 
         {/* Copy room link */}

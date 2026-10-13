@@ -21,6 +21,7 @@ export function useCollaboration({ socket, roomId, userName }) {
   const [lineAuthors, setLineAuthors] = useState({});
   const [files, setFiles]             = useState([]);
   const [activeFile, setActiveFile]   = useState(null);
+  const [originalCode, setOriginalCode] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
 
   // ── Scoped Workspace Meta ─────────────────────────────────────────────────
@@ -28,6 +29,7 @@ export function useCollaboration({ socket, roomId, userName }) {
   const [workspaceId, setWorkspaceId]       = useState(null);
   const [sessionId, setSessionId]           = useState(null);
   const [sessionMembers, setSessionMembers] = useState([]);
+  const [githubRepo, setGithubRepo]         = useState(null);
 
   // ── Team Presence & Collaboration Requests ────────────────────────────────
   const [teamUsers, setTeamUsers]               = useState([]);
@@ -74,6 +76,11 @@ export function useCollaboration({ socket, roomId, userName }) {
     // Join room for team presence and chat
     socket.emit("join-room", { roomId, userName });
 
+    const handleReconnect = () => {
+      socket.emit("join-room", { roomId, userName });
+    };
+    socket.on("connect", handleReconnect);
+
     // Initial state on join
     const handleRoomState = (data) => {
       isRemoteChange.current = true;
@@ -82,10 +89,12 @@ export function useCollaboration({ socket, roomId, userName }) {
       if (data.lineAuthors) setLineAuthors(data.lineAuthors);
       if (data.files) setFiles(data.files);
       if (data.activeFile !== undefined) setActiveFile(data.activeFile);
+      if (data.originalCode !== undefined) setOriginalCode(data.originalCode);
       if (data.whiteboard) setWhiteboardElements(data.whiteboard);
       if (data.viewMode) setViewMode(data.viewMode);
       if (data.workspaceType) setWorkspaceType(data.workspaceType);
       if (data.workspaceId) setWorkspaceId(data.workspaceId);
+      if (data.githubRepo !== undefined) setGithubRepo(data.githubRepo);
       if (data.users) {
         setTeamUsers(data.users);
         data.users.forEach((u) => {
@@ -102,10 +111,12 @@ export function useCollaboration({ socket, roomId, userName }) {
       setLineAuthors(data.lineAuthors || {});
       setFiles(data.files || []);
       setActiveFile(data.activeFile !== undefined ? data.activeFile : null);
+      setOriginalCode(data.originalCode !== undefined ? data.originalCode : null);
       setWhiteboardElements(data.whiteboard || []);
       if (data.viewMode) setViewMode(data.viewMode);
       setWorkspaceType(data.workspaceType || "personal");
       setWorkspaceId(data.workspaceId || null);
+      setGithubRepo(data.githubRepo || null);
 
       // Reset cursors and transient states for fresh workspace
       setRemoteCursors({});
@@ -272,12 +283,13 @@ export function useCollaboration({ socket, roomId, userName }) {
       window.alert(message || "Rename failed.");
     });
 
-    socket.on("active-file-changed", ({ path, code: c, language: l, lineAuthors: la }) => {
+    socket.on("active-file-changed", ({ path, code: c, language: l, lineAuthors: la, originalCode: orig }) => {
       isRemoteChange.current = true;
       setActiveFile(path);
       setCode(c);
       setLanguageSt(l);
       setLineAuthors(la || {});
+      setOriginalCode(orig !== undefined ? orig : null);
     });
 
     // ── Team Chat ───────────────────────────────────────────────────────────
@@ -312,6 +324,11 @@ export function useCollaboration({ socket, roomId, userName }) {
       }
     });
 
+    // ── GitHub Repo Link updates ───────────────────────────────────────────
+    socket.on("github-repo-linked", (repoData) => {
+      setGithubRepo(repoData || null);
+    });
+
     return () => {
       socket.off("room-state", handleRoomState);
       socket.off("workspace-state", handleWorkspaceState);
@@ -340,6 +357,8 @@ export function useCollaboration({ socket, roomId, userName }) {
       socket.off("whiteboard-draw-step");
       socket.off("whiteboard-cursor-update");
       socket.off("view-mode-update");
+      socket.off("github-repo-linked");
+      socket.off("connect", handleReconnect);
     };
   }, [socket, roomId, userName]);
 
@@ -579,6 +598,8 @@ export function useCollaboration({ socket, roomId, userName }) {
 
   return {
     code,
+    originalCode,
+    setOriginalCode,
     language,
     users,
     teamUsers,
@@ -586,6 +607,8 @@ export function useCollaboration({ socket, roomId, userName }) {
     workspaceId,
     sessionId,
     sessionMembers,
+    githubRepo,
+    setGithubRepo,
     incomingRequests,
     outgoingRequests,
     remoteCursors,
