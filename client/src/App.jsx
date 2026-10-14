@@ -27,9 +27,34 @@ import VoiceCallDock from "./components/VoiceCallDock";
 
 export default function App() {
   // ── Theme ────────────────────────────────────────────────────────────────
-  const [isDark, setIsDark] = useState(true);
+  const [isDark, setIsDark] = useState(() => {
+    try {
+      const saved = localStorage.getItem("paireditor-theme");
+      if (saved !== null) {
+        return saved === "dark";
+      }
+    } catch {
+      // Ignore storage errors in restricted contexts
+    }
+    return true;
+  });
+
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", isDark);
+    const root = document.documentElement;
+    if (isDark) {
+      root.classList.add("dark");
+      root.classList.remove("light");
+      root.setAttribute("data-theme", "dark");
+    } else {
+      root.classList.remove("dark");
+      root.classList.add("light");
+      root.setAttribute("data-theme", "light");
+    }
+    try {
+      localStorage.setItem("paireditor-theme", isDark ? "dark" : "light");
+    } catch {
+      // Ignore storage errors
+    }
   }, [isDark]);
 
   // ── Room / user session ──────────────────────────────────────────────────
@@ -243,9 +268,18 @@ export default function App() {
     emitLineAuthors(changedLines, localAuthorRef.current);
   };
 
+  const toastStyle = {
+    background: isDark ? "#161B22" : "#FFFFFF",
+    color: isDark ? "#EDEFF2" : "#0F172A",
+    border: isDark ? "1px solid rgba(255,255,255,0.07)" : "1px solid rgba(15,23,42,0.1)",
+    borderRadius: "6px",
+    fontSize: "13px",
+    fontFamily: "'JetBrains Mono', monospace",
+  };
+
   return (
     <>
-      <Toaster position="top-right" />
+      <Toaster position="top-right" toastOptions={{ style: toastStyle }} />
 
       {/* ── Lock Expiring Warning Banner ── */}
       {lockExpiringWarning && (
@@ -313,16 +347,18 @@ export default function App() {
         files={files}
       />
 
-      <div className={`h-screen flex flex-col overflow-hidden ${isDark ? "dark" : "light"}`}>
+      <div className={`h-screen flex flex-col overflow-hidden bg-canvas text-paper ${isDark ? "dark" : "light"}`}>
         <AnimatePresence mode="wait">
           {!session ? (
             <RoomJoin
               key="landing"
               onJoin={handleJoin}
               defaultRoom={urlRoom}
+              isDark={isDark}
+              onToggleTheme={() => setIsDark((d) => !d)}
             />
           ) : (
-            <div key="editor" className="flex flex-col h-full bg-canvas">
+            <div key="editor" className="flex flex-col h-full bg-canvas text-paper">
               {/* ── Top toolbar ── */}
               <Toolbar
                 roomId={session.roomId}
@@ -481,11 +517,4 @@ export default function App() {
   );
 }
 
-const toastStyle = {
-  background: "#161B22",
-  color: "#EDEFF2",
-  border: "1px solid rgba(255,255,255,0.07)",
-  borderRadius: "6px",
-  fontSize: "13px",
-  fontFamily: "'JetBrains Mono', monospace",
-};
+

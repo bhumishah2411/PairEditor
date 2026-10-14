@@ -9,41 +9,43 @@ export default {
         mono: ["JetBrains Mono", "Fira Code", "monospace"],
       },
       colors: {
-        // Deep blue-charcoal canvas — never pure black
-        canvas: "#10141A",
+        canvas: "rgb(var(--color-canvas) / <alpha-value>)",
         panel: {
-          DEFAULT: "#161B22",
-          raised: "#1D232B",
-          sunken: "#0C1015",
+          DEFAULT: "rgb(var(--color-panel) / <alpha-value>)",
+          raised: "rgb(var(--color-panel-raised) / <alpha-value>)",
+          sunken: "rgb(var(--color-panel-sunken) / <alpha-value>)",
         },
         paper: {
-          DEFAULT: "#EDEFF2",
-          muted: "#8791A3",
-          faint: "#5B6270",
+          DEFAULT: "rgb(var(--color-paper) / <alpha-value>)",
+          muted: "rgb(var(--color-paper-muted) / <alpha-value>)",
+          faint: "rgb(var(--color-paper-faint) / <alpha-value>)",
         },
-        line: "rgba(255,255,255,0.07)",
-        // Restrained phosphor-green signal accent — used sparingly
+        line: ({ opacityValue }) => {
+          if (opacityValue !== undefined) {
+            return `rgb(var(--color-line) / ${Math.min(Number(opacityValue), 0.25)})`;
+          }
+          return `rgb(var(--color-line) / var(--color-line-alpha, 0.08))`;
+        },
         signal: {
-          DEFAULT: "#6FE3A6",
-          dim: "rgba(111,227,166,0.12)",
-          hover: "#8CEDB9",
+          DEFAULT: "rgb(var(--color-signal) / <alpha-value>)",
+          dim: "var(--color-signal-dim)",
+          hover: "rgb(var(--color-signal-hover) / <alpha-value>)",
         },
-        danger: "#E5675C",
-        warning: "#E3B564",
-        // Retained for compatibility with any legacy references
+        danger: "rgb(var(--color-danger) / <alpha-value>)",
+        warning: "rgb(var(--color-warning) / <alpha-value>)",
         surface: {
-          900: "#10141A",
-          800: "#161B22",
-          700: "#1D232B",
-          600: "#242B34",
-          500: "#2E3644",
+          900: "rgb(var(--color-canvas) / <alpha-value>)",
+          800: "rgb(var(--color-panel) / <alpha-value>)",
+          700: "rgb(var(--color-panel-raised) / <alpha-value>)",
+          600: "rgb(var(--color-panel-raised) / <alpha-value>)",
+          500: "rgb(var(--color-paper-faint) / <alpha-value>)",
         },
         accent: {
-          DEFAULT: "#6FE3A6",
-          hover: "#8CEDB9",
-          glow: "rgba(111,227,166,0.18)",
+          DEFAULT: "rgb(var(--color-signal) / <alpha-value>)",
+          hover: "rgb(var(--color-signal-hover) / <alpha-value>)",
+          glow: "var(--color-signal-dim)",
         },
-        success: "#6FE3A6",
+        success: "rgb(var(--color-signal) / <alpha-value>)",
         // Author palette — the app's real accent system (matches server USER_COLORS)
         author: [
           "#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FECA57",

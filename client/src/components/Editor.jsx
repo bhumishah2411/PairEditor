@@ -55,10 +55,18 @@ export default function Editor({
   useEffect(() => { isUnlockedRef.current     = isUnlocked;     }, [isUnlocked]);
   useEffect(() => { activeFileRef.current     = activeFile;     }, [activeFile]);
 
+  // Dynamically update Monaco Editor theme when isDark changes
+  useEffect(() => {
+    if (monacoRef.current) {
+      monacoRef.current.editor.setTheme(isDark ? "vs-dark" : "vs");
+    }
+  }, [isDark]);
+
   // ── Mount ──────────────────────────────────────────────────────────────────
   const handleMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
+    monaco.editor.setTheme(isDark ? "vs-dark" : "vs");
 
     // Use refs so these listeners always call the latest prop values
     editor.onDidChangeCursorPosition((e) =>
@@ -360,7 +368,7 @@ export default function Editor({
 
         {/* Author gutter */}
         <div className="author-gutter">
-          {(gutterColors.length ? gutterColors : ["#242B34"]).map((c, i) => (
+          {(gutterColors.length ? gutterColors : [isDark ? "#242B34" : "#E2E8F0"]).map((c, i) => (
             <span key={i} style={{ backgroundColor: c }} />
           ))}
         </div>
@@ -369,7 +377,7 @@ export default function Editor({
           height="100%"
           language={language}
           value={code}
-          theme={isDark ? "vs-dark" : "light"}
+          theme={isDark ? "vs-dark" : "vs"}
           onChange={handleChange}
           onMount={handleMount}
           options={{
