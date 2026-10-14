@@ -1357,6 +1357,9 @@ io.on("connection", (socket) => {
     const teamUsers = getTeamUsers(room);
     io.to(roomId).emit("users-update", teamUsers);
     io.to(roomId).emit("presence-update", teamUsers);
+
+    // Send active voice call participants list
+    socket.emit("voice-call-participants-update", Array.from(room.voiceParticipants?.values() || []));
   });
 
   // ── Collaboration request / response ───────────────────────────────────────
@@ -1869,6 +1872,80 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("chat-message", payload);
   });
 
+  // ── Voice Calling (WebRTC Signaling) ────────────────────────────────────────
+  socket.on("voice-call-join", () => {
+    const roomId = socket.roomId;
+    if (!roomId) return;
+    const room = rooms.get(roomId);
+    if (!room) return;
+    const user = room.users.get(socket.id);
+    if (!user) return;
+
+    if (!room.voiceParticipants) room.voiceParticipants = new Map();
+
+    // Send existing callers to the new joiner
+    const existingParticipants = Array.from(room.voiceParticipants.values()).filter((p) => p.id !== socket.id);
+    socket.emit("voice-call-users", existingParticipants);
+
+    const participant = {
+      id: socket.id,
+      name: user.name,
+      color: user.color,
+      muted: false,
+      speaking: false,
+    };
+    room.voiceParticipants.set(socket.id, participant);
+
+    // Broadcast new joiner to others in the room
+    socket.to(roomId).emit("voice-call-user-joined", participant);
+    io.to(roomId).emit("voice-call-participants-update", Array.from(room.voiceParticipants.values()));
+  });
+
+  socket.on("voice-call-signal", ({ to, signal }) => {
+    if (!to || !signal) return;
+    io.to(to).emit("voice-call-signal", {
+      from: socket.id,
+      signal,
+    });
+  });
+
+  socket.on("voice-call-mute", ({ muted }) => {
+    const roomId = socket.roomId;
+    if (!roomId) return;
+    const room = rooms.get(roomId);
+    if (!room || !room.voiceParticipants) return;
+    const p = room.voiceParticipants.get(socket.id);
+    if (p) {
+      p.muted = Boolean(muted);
+      socket.to(roomId).emit("voice-call-user-muted", { id: socket.id, muted: p.muted });
+      io.to(roomId).emit("voice-call-participants-update", Array.from(room.voiceParticipants.values()));
+    }
+  });
+
+  socket.on("voice-call-speaking", ({ speaking }) => {
+    const roomId = socket.roomId;
+    if (!roomId) return;
+    const room = rooms.get(roomId);
+    if (!room || !room.voiceParticipants) return;
+    const p = room.voiceParticipants.get(socket.id);
+    if (p) {
+      p.speaking = Boolean(speaking);
+      socket.to(roomId).emit("voice-call-user-speaking", { id: socket.id, speaking: p.speaking });
+    }
+  });
+
+  socket.on("voice-call-leave", () => {
+    const roomId = socket.roomId;
+    if (!roomId) return;
+    const room = rooms.get(roomId);
+    if (!room || !room.voiceParticipants) return;
+    if (room.voiceParticipants.has(socket.id)) {
+      room.voiceParticipants.delete(socket.id);
+      socket.to(roomId).emit("voice-call-user-left", { id: socket.id });
+      io.to(roomId).emit("voice-call-participants-update", Array.from(room.voiceParticipants.values()));
+    }
+  });
+
   // ── Scoped Whiteboard events ───────────────────────────────────────────────
   socket.on("whiteboard-update", ({ elements }) => {
     const ws = getSocketWorkspace(socket);
@@ -1943,6 +2020,13 @@ io.on("connection", (socket) => {
 
     // Clean up all pending requests involving this socket
     clearPendingRequestsForUser(socket.id, "cancelled");
+
+    // Clean up voice call if user was in call
+    if (room.voiceParticipants && room.voiceParticipants.has(socket.id)) {
+      room.voiceParticipants.delete(socket.id);
+      socket.to(roomId).emit("voice-call-user-left", { id: socket.id });
+      io.to(roomId).emit("voice-call-participants-update", Array.from(room.voiceParticipants.values()));
+    }
 
     // Notify room of departure
     socket.to(roomId).emit("user-left", { userId: socket.id });

@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import {
   Play, Copy, Check, Sun, Moon, ChevronDown, Loader2, Download,
   Code2, Columns, Presentation, Lock, Users, LogOut,
+  Headphones, PhoneCall,
 } from "lucide-react";
 import GithubIcon from "./GithubIcon";
 import { LANGUAGES } from "../utils/constants";
@@ -30,6 +31,10 @@ export default function Toolbar({
   onLanguageChange,
   onRun,
   isRunning,
+  isInCall = false,
+  callCount = 0,
+  onJoinCall,
+  onLeaveCall,
 }) {
   const [copied, setCopied]             = useState(false);
   const [langOpen, setLangOpen]         = useState(false);
@@ -253,6 +258,46 @@ export default function Toolbar({
               className="w-1.5 h-1.5 rounded-full bg-signal inline-block"
               title={`Linked to ${githubRepo.owner}/${githubRepo.repo}`}
             />
+          )}
+        </button>
+
+        {/* Voice Call Button */}
+        <button
+          id="btn-voice-call"
+          onClick={isInCall ? onLeaveCall : onJoinCall}
+          title={
+            isInCall
+              ? "Leave voice call"
+              : callCount > 0
+              ? `Join voice call (${callCount} in call)`
+              : "Start voice call"
+          }
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs font-mono transition-all ${
+            isInCall
+              ? "bg-signal/15 border-signal/50 text-signal shadow-[0_0_10px_rgba(111,227,166,0.2)] font-semibold"
+              : callCount > 0
+              ? "bg-signal/10 border-signal/30 text-signal hover:bg-signal/20 animate-pulse font-medium"
+              : "bg-panel-raised border-line text-paper-muted hover:text-paper hover:border-signal/40"
+          }`}
+        >
+          {isInCall ? (
+            <Headphones size={13} className="text-signal" />
+          ) : (
+            <PhoneCall size={13} className={callCount > 0 ? "text-signal" : "text-paper-muted"} />
+          )}
+          <span className="hidden sm:inline">
+            {isInCall ? "in call" : "call"}
+          </span>
+          {callCount > 0 && (
+            <span
+              className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
+                isInCall
+                  ? "bg-signal text-canvas font-bold"
+                  : "bg-signal/20 text-signal font-semibold"
+              }`}
+            >
+              {callCount}
+            </span>
           )}
         </button>
 

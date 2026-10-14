@@ -26,6 +26,8 @@ import OutputPanel    from "./components/OutputPanel";
 import CollabRequests from "./components/CollabRequests";
 import LeaveConfirmModal from "./components/LeaveConfirmModal";
 import GitHubModal from "./components/GitHubModal";
+import useVoiceCall from "./hooks/useVoiceCall";
+import VoiceCallDock from "./components/VoiceCallDock";
 
 export default function App() {
   // ── Theme ────────────────────────────────────────────────────────────────
@@ -230,6 +232,13 @@ export default function App() {
     teamUsers.find((u) => u.id === socket?.id) ||
     users.find((u) => u.id === socket?.id);
 
+  // ── Voice Calling ──────────────────────────────────────────────────────────
+  const voiceCall = useVoiceCall({
+    socket,
+    roomId: session?.roomId,
+    currentUser,
+  });
+
   /**
    * Stable ref always holding the local user's author info.
    */
@@ -326,6 +335,10 @@ export default function App() {
                 onLanguageChange={handleLanguageChange}
                 onRun={handleRun}
                 isRunning={isRunning}
+                isInCall={voiceCall.isInCall}
+                callCount={voiceCall.callCount}
+                onJoinCall={voiceCall.joinCall}
+                onLeaveCall={voiceCall.leaveCall}
               />
 
               {/* ── Main area ── */}
@@ -425,6 +438,19 @@ export default function App() {
                   )}
                 </AnimatePresence>
               </div>
+
+              {/* ── Voice Call Floating Dock ── */}
+              <VoiceCallDock
+                isInCall={voiceCall.isInCall}
+                isConnecting={voiceCall.isConnecting}
+                isMuted={voiceCall.isMuted}
+                isDeafened={voiceCall.isDeafened}
+                participants={voiceCall.participants}
+                currentUser={currentUser}
+                onToggleMute={voiceCall.toggleMute}
+                onToggleDeafen={voiceCall.toggleDeafen}
+                onLeaveCall={voiceCall.leaveCall}
+              />
 
               {/* ── Floating chat toggle button ── */}
               <button
