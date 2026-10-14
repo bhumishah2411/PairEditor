@@ -504,13 +504,6 @@ export function useCollaboration({ socket, roomId, userName }) {
     [socket]
   );
 
-  // ── Team Chat ──────────────────────────────────────────────────────────────
-  const sendChatMessage = useCallback(
-    (message) => {
-      socket?.emit("chat-message", { message });
-    },
-    [socket]
-  );
 
   // ── Whiteboard ─────────────────────────────────────────────────────────────
   const handleWhiteboardChange = useCallback(
