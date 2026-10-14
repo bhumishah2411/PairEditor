@@ -2,7 +2,7 @@ import { useState } from "react";
 import {
   Play, Copy, Check, Sun, Moon, ChevronDown, Loader2, Download,
   Code2, Columns, Presentation,
-  Headphones, PhoneCall,
+  Headphones, PhoneCall, Video,
 } from "lucide-react";
 import GithubIcon from "./GithubIcon";
 import { LANGUAGES } from "../utils/constants";
@@ -27,9 +27,13 @@ export default function Toolbar({
   onRun,
   isRunning,
   isInCall = false,
+  isVideoEnabled = false,
   callCount = 0,
   onJoinCall,
+  onJoinVoiceCall,
+  onJoinVideoCall,
   onLeaveCall,
+  onToggleVideo,
 }) {
   const [copied, setCopied]           = useState(false);
   const [langOpen, setLangOpen]       = useState(false);
@@ -216,7 +220,7 @@ export default function Toolbar({
         {/* Voice Call Button */}
         <button
           id="btn-voice-call"
-          onClick={isInCall ? onLeaveCall : onJoinCall}
+          onClick={isInCall ? onLeaveCall : (onJoinVoiceCall || onJoinCall)}
           title={
             isInCall
               ? "Leave voice call"
@@ -238,7 +242,7 @@ export default function Toolbar({
             <PhoneCall size={13} className={callCount > 0 ? "text-signal" : "text-paper-muted"} />
           )}
           <span className="hidden sm:inline">
-            {isInCall ? "in call" : "call"}
+            {isInCall ? "in call" : "voice"}
           </span>
           {callCount > 0 && (
             <span
@@ -251,6 +255,31 @@ export default function Toolbar({
               {callCount}
             </span>
           )}
+        </button>
+
+        {/* Video Call Button */}
+        <button
+          id="btn-video-call"
+          onClick={isInCall ? onToggleVideo : onJoinVideoCall}
+          title={
+            isInCall
+              ? isVideoEnabled
+                ? "Turn camera off"
+                : "Turn camera on"
+              : "Start video call"
+          }
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs font-mono transition-all ${
+            isInCall && isVideoEnabled
+              ? "bg-signal/20 border-signal text-signal shadow-[0_0_10px_rgba(111,227,166,0.25)] font-semibold"
+              : isInCall
+              ? "bg-panel-raised border-line text-paper-muted hover:text-paper hover:border-signal/40"
+              : "bg-panel-raised border-line text-paper-muted hover:text-paper hover:border-signal/40"
+          }`}
+        >
+          <Video size={13} className={isInCall && isVideoEnabled ? "text-signal" : "text-paper-muted"} />
+          <span className="hidden sm:inline">
+            {isInCall ? (isVideoEnabled ? "video on" : "video off") : "video"}
+          </span>
         </button>
 
         {/* Copy room link */}

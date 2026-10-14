@@ -1892,8 +1892,8 @@ io.on("connection", (socket) => {
     io.to(room.id).emit("chat-message", payload);
   });
 
-  // ── Voice Calling (WebRTC Signaling) ────────────────────────────────────────
-  socket.on("voice-call-join", () => {
+  // ── Voice & Video Calling (WebRTC Signaling) ───────────────────────────────
+  socket.on("voice-call-join", (payload = {}) => {
     const roomId = socket.roomId;
     if (!roomId) return;
     const room = rooms.get(roomId);
@@ -1913,6 +1913,7 @@ io.on("connection", (socket) => {
       color: user.color,
       muted: false,
       speaking: false,
+      video: Boolean(payload?.video),
     };
     room.voiceParticipants.set(socket.id, participant);
 
@@ -1938,6 +1939,19 @@ io.on("connection", (socket) => {
     if (p) {
       p.muted = Boolean(muted);
       socket.to(roomId).emit("voice-call-user-muted", { id: socket.id, muted: p.muted });
+      io.to(roomId).emit("voice-call-participants-update", Array.from(room.voiceParticipants.values()));
+    }
+  });
+
+  socket.on("voice-call-video", ({ video }) => {
+    const roomId = socket.roomId;
+    if (!roomId) return;
+    const room = rooms.get(roomId);
+    if (!room || !room.voiceParticipants) return;
+    const p = room.voiceParticipants.get(socket.id);
+    if (p) {
+      p.video = Boolean(video);
+      socket.to(roomId).emit("voice-call-user-video", { id: socket.id, video: p.video });
       io.to(roomId).emit("voice-call-participants-update", Array.from(room.voiceParticipants.values()));
     }
   });

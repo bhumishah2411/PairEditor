@@ -377,9 +377,13 @@ export default function App() {
                 onRun={handleRun}
                 isRunning={isRunning}
                 isInCall={voiceCall.isInCall}
+                isVideoEnabled={voiceCall.isVideoEnabled}
                 callCount={voiceCall.callCount}
                 onJoinCall={voiceCall.joinCall}
+                onJoinVoiceCall={voiceCall.startVoiceCall}
+                onJoinVideoCall={voiceCall.startVideoCall}
                 onLeaveCall={voiceCall.leaveCall}
+                onToggleVideo={voiceCall.toggleVideo}
               />
 
               {/* ── Main area ── */}
@@ -482,16 +486,21 @@ export default function App() {
                 </AnimatePresence>
               </div>
 
-              {/* ── Voice Call Floating Dock ── */}
+              {/* ── Voice & Video Call Floating Dock ── */}
               <VoiceCallDock
                 isInCall={voiceCall.isInCall}
                 isConnecting={voiceCall.isConnecting}
                 isMuted={voiceCall.isMuted}
                 isDeafened={voiceCall.isDeafened}
+                isVideoEnabled={voiceCall.isVideoEnabled}
+                callMode={voiceCall.callMode}
                 participants={voiceCall.participants}
                 currentUser={currentUser}
+                localStream={voiceCall.localStream}
+                remoteStreams={voiceCall.remoteStreams}
                 onToggleMute={voiceCall.toggleMute}
                 onToggleDeafen={voiceCall.toggleDeafen}
+                onToggleVideo={voiceCall.toggleVideo}
                 onLeaveCall={voiceCall.leaveCall}
               />
 
