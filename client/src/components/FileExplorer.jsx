@@ -4,12 +4,11 @@
  * (everyone in the room follows, same as the rest of this app's model).
  */
 import { useState, useRef, useCallback } from "react";
-import { motion } from "framer-motion";
-import { Folder, FolderOpen, FileCode, ChevronRight, FolderUp, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Folder, FolderOpen, FileCode, ChevronRight, FolderUp, Loader2, Pencil, Lock, Plus, Trash2, Eye } from "lucide-react";
 import GithubIcon from "./GithubIcon";
 import { buildFileTree } from "../utils/fileTree";
 
-export default function FileExplorer({ files, activeFile, isUploading, onUploadFolder, onCreateFile, onRenameFile, onDeleteFile, onSelectFile, onOpenGitHubModal }) {
+export default function FileExplorer({ files, activeFile, currentUserId, isUploading, onUploadFolder, onCreateFile, onRenameFile, onDeleteFile, onSelectFile, onOpenGitHubModal }) {
   const inputRef = useRef(null);
   const [expanded, setExpanded] = useState(new Set());
   const [editingPath, setEditingPath] = useState(null);
@@ -131,6 +130,7 @@ export default function FileExplorer({ files, activeFile, isUploading, onUploadF
             expanded={expanded}
             onToggleFolder={toggleFolder}
             activeFile={activeFile}
+            currentUserId={currentUserId}
             editingPath={editingPath}
             renameDraft={renameDraft}
             onRenameDraftChange={setRenameDraft}
@@ -147,7 +147,7 @@ export default function FileExplorer({ files, activeFile, isUploading, onUploadF
   );
 }
 
-function TreeNodes({ nodes, depth, expanded, onToggleFolder, activeFile, editingPath, renameDraft, onRenameDraftChange, onStartRename, onCancelRename, onCommitRename, onDeleteFile, onSelectFile, onRenameFile }) {
+function TreeNodes({ nodes, depth, expanded, onToggleFolder, activeFile, currentUserId, editingPath, renameDraft, onRenameDraftChange, onStartRename, onCancelRename, onCommitRename, onDeleteFile, onSelectFile, onRenameFile }) {
   return (
     <>
       {nodes.map((node) =>
@@ -159,6 +159,7 @@ function TreeNodes({ nodes, depth, expanded, onToggleFolder, activeFile, editing
             expanded={expanded}
             onToggleFolder={onToggleFolder}
             activeFile={activeFile}
+            currentUserId={currentUserId}
             editingPath={editingPath}
             renameDraft={renameDraft}
             onRenameDraftChange={onRenameDraftChange}
@@ -174,6 +175,7 @@ function TreeNodes({ nodes, depth, expanded, onToggleFolder, activeFile, editing
             key={node.path}
             node={node}
             depth={depth}
+            currentUserId={currentUserId}
             isActive={node.path === activeFile}
             isEditing={editingPath === node.path}
             renameDraft={renameDraft}
@@ -197,6 +199,7 @@ function FolderRow({
   expanded,
   onToggleFolder,
   activeFile,
+  currentUserId,
   editingPath,
   renameDraft,
   onRenameDraftChange,
@@ -227,13 +230,14 @@ function FolderRow({
         <span className="font-mono text-xs text-paper-muted truncate">{node.name}</span>
       </button>
       {isOpen && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.12 }}>
+        <div className="transition-opacity duration-100">
           <TreeNodes
             nodes={node.children}
             depth={depth + 1}
             expanded={expanded}
             onToggleFolder={onToggleFolder}
             activeFile={activeFile}
+            currentUserId={currentUserId}
             editingPath={editingPath}
             renameDraft={renameDraft}
             onRenameDraftChange={onRenameDraftChange}
@@ -244,15 +248,27 @@ function FolderRow({
             onSelectFile={onSelectFile}
             onRenameFile={onRenameFile}
           />
-        </motion.div>
+        </div>
       )}
     </div>
   );
 }
 
+function formatTimeAgo(timestamp) {
+  if (!timestamp) return "";
+  const sec = Math.floor((Date.now() - timestamp) / 1000);
+  if (sec < 60) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
+}
+
 function FileRow({
   node,
   depth,
+  currentUserId,
   isActive,
   isEditing,
   renameDraft,
@@ -262,7 +278,6 @@ function FileRow({
   onCommitRename,
   onDeleteFile,
   onSelectFile,
-  onRenameFile,
 }) {
   const handleDelete = (e) => {
     e.stopPropagation();
@@ -270,6 +285,21 @@ function FileRow({
     if (!confirmed) return;
     onDeleteFile?.(node.path);
   };
+
+  const isLockedByMe = Boolean(node.lock && node.lock.userId === currentUserId);
+  const isLockedByOther = Boolean(node.lock && node.lock.userId !== currentUserId);
+
+  const tooltipParts = [node.path];
+  if (node.lock) {
+    tooltipParts.push(`Editing: ${node.lock.userName}`);
+  }
+  if (node.viewers && node.viewers.length > 0) {
+    tooltipParts.push(`Viewing: ${node.viewers.map((v) => v.name).join(", ")}`);
+  }
+  if (node.lastEditedBy) {
+    tooltipParts.push(`Last edited by ${node.lastEditedBy.name} ${formatTimeAgo(node.lastEditedBy.timestamp)}`);
+  }
+  const tooltipText = tooltipParts.join(" • ");
 
   if (isEditing) {
     return (
@@ -296,18 +326,69 @@ function FileRow({
         isActive ? "bg-signal/12 text-signal" : "text-paper-muted hover:bg-panel-raised/70 hover:text-paper"
       }`}
       style={{ paddingLeft: `${8 + depth * 14 + 14}px` }}
-      title={node.path}
+      title={tooltipText}
     >
       <button
         type="button"
         onClick={() => onSelectFile(node.path)}
         className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left"
       >
-        <FileCode size={13} className="shrink-0" />
-        <span className="font-mono text-xs truncate">{node.name}</span>
+        {/* Spec 5: unlocked = normal icon; locked by another = lock icon + user color dot + name; locked by me = green pencil icon "abc.js (You)" */}
+        {isLockedByMe ? (
+          <>
+            <Pencil size={12} className="shrink-0 text-emerald-400" />
+            <span className="font-mono text-xs truncate">
+              {node.name} <span className="text-emerald-400 font-semibold text-[11px]">(You)</span>
+            </span>
+          </>
+        ) : isLockedByOther ? (
+          <>
+            <Lock size={12} className="shrink-0" style={{ color: node.lock.color }} />
+            <span
+              className="w-1.5 h-1.5 rounded-full shrink-0"
+              style={{ backgroundColor: node.lock.color }}
+            />
+            <span className="font-mono text-xs truncate">
+              {node.name}{" "}
+              <span className="font-medium text-[11px]" style={{ color: node.lock.color }}>
+                ({node.lock.userName})
+              </span>
+            </span>
+          </>
+        ) : (
+          <>
+            <FileCode size={13} className="shrink-0" />
+            <span className="font-mono text-xs truncate">{node.name}</span>
+          </>
+        )}
+
+        {/* Active viewers eye avatar indicators */}
+        {node.viewers && node.viewers.length > 0 && (
+          <div
+            className="flex items-center -space-x-1 shrink-0 ml-auto mr-1"
+            title={`Viewing: ${node.viewers.map((v) => v.name).join(", ")}`}
+          >
+            <Eye size={11} className="text-paper-faint mr-1 shrink-0" />
+            {node.viewers.slice(0, 3).map((v) => (
+              <span
+                key={v.id}
+                className="w-3 h-3 rounded-full flex items-center justify-center text-[8px] font-mono font-bold text-canvas border border-canvas shrink-0"
+                style={{ backgroundColor: v.color }}
+              >
+                {v.name.charAt(0).toUpperCase()}
+              </span>
+            ))}
+            {node.viewers.length > 3 && (
+              <span className="text-[8px] font-mono text-paper-faint pl-1">
+                +{node.viewers.length - 3}
+              </span>
+            )}
+          </div>
+        )}
+
         {node.isModified && (
           <span
-            className="ml-auto mr-1 w-1.5 h-1.5 rounded-full bg-signal shrink-0"
+            className="mr-1 w-1.5 h-1.5 rounded-full bg-signal shrink-0"
             title="Modified from GitHub"
           />
         )}
