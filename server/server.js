@@ -53,6 +53,8 @@ const io = new Server(server, {
  * }
  */
 const rooms = new Map();
+/** Global lock store Map<roomId, Map<filePath, { socketId, userName, userColor, acquiredAt }>> */
+const roomFileLocks = new Map();
 
 /** Predefined user colours so each visitor gets a unique accent */
 const USER_COLORS = [
@@ -102,12 +104,15 @@ function getOrCreateRoom(roomId) {
       lastEditedBy: null,
     });
 
+    const fileLocksMap = new Map();
+    roomFileLocks.set(roomId, fileLocksMap);
+
     rooms.set(roomId, {
       id: roomId,
       users: new Map(),
       files: initialFiles,
       memberActiveFile: new Map(),
-      fileLocks: new Map(),
+      fileLocks: fileLocksMap,
       lockTimeouts: new Map(),
       lockRequests: new Map(),
       lineAuthorsByFile: new Map([[defaultFile, new Map()]]),
@@ -195,29 +200,31 @@ function clearLockTimers(room, path) {
   }
 }
 
-/** Set/Reset 45s warning and 60s auto-release timers for a file lock */
+/** Set/Reset 9-minute warning and 10-minute auto-release timers for a file lock (Spec 4) */
 function scheduleLockTimers(room, path) {
   clearLockTimers(room, path);
 
   const lock = room.fileLocks.get(path);
   if (!lock) return;
 
+  // 1 minute before 10 minutes (9 minutes = 540 seconds)
   const warnTimer = setTimeout(() => {
     const currentLock = room.fileLocks.get(path);
     if (currentLock && currentLock.userId === lock.userId) {
       io.to(lock.userId).emit("file-lock-expiring", {
         path,
-        remainingSeconds: 15,
+        remainingSeconds: 60,
       });
     }
-  }, 45 * 1000);
+  }, 9 * 60 * 1000);
 
+  // 10 minutes (600 seconds)
   const expireTimer = setTimeout(() => {
     const currentLock = room.fileLocks.get(path);
     if (currentLock && currentLock.userId === lock.userId) {
       releaseFileLock(room, path, "expired");
     }
-  }, 60 * 1000);
+  }, 10 * 60 * 1000);
 
   room.lockTimeouts.set(path, { warnTimer, expireTimer });
 }
@@ -240,16 +247,18 @@ function releaseFileLock(room, path, reason = "released") {
     room.lockRequests.delete(path);
   }
 
-  // Broadcast lock state updates
-  io.to(room.id).emit("file-locks-update", {
+  // Broadcast lock state updates (support both file-locks-update and spec-defined file-locks-updated)
+  const lockPayload = {
     locks: Object.fromEntries(room.fileLocks),
     files: fileListFor(room),
-  });
+  };
+  io.to(room.id).emit("file-locks-update", lockPayload);
+  io.to(room.id).emit("file-locks-updated", lockPayload);
 
   if (reason === "expired") {
     io.to(lock.userId).emit("file-lock-lost", {
       path,
-      reason: "Lock expired after 60 seconds of inactivity.",
+      reason: "Lock expired after 10 minutes of inactivity.",
     });
     logActivity(room, {
       type: "lock-expired",
@@ -1180,7 +1189,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ── file-open (Per-member active file) ──────────────────────────────────────
+  // ── file-open (Per-member active file & Auto write-lock acquisition) ───────
   socket.on("file-open", ({ path }) => {
     const room = rooms.get(socket.roomId);
     if (!room || !path) return;
@@ -1188,8 +1197,9 @@ io.on("connection", (socket) => {
     const safePath = String(path).replace(/^\/+/, "");
     if (!room.files.has(safePath)) return;
 
+    const user = room.users.get(socket.id);
+
     // Auto-release previous lock if user switches away from the locked file
-    const currentLock = room.fileLocks.get(safePath);
     for (const [existingPath, lock] of room.fileLocks.entries()) {
       if (lock.userId === socket.id && existingPath !== safePath) {
         releaseFileLock(room, existingPath, "switched");
@@ -1198,19 +1208,78 @@ io.on("connection", (socket) => {
 
     room.memberActiveFile.set(socket.id, safePath);
 
+    // First-come, first-served write lock (Spec 2 & Spec 7)
+    let hasWriteAccess = false;
+    const existingLock = room.fileLocks.get(safePath);
+
+    if (!existingLock) {
+      if (user) {
+        room.fileLocks.set(safePath, {
+          userId: socket.id,
+          userName: user.name,
+          color: user.color,
+          lockedAt: Date.now(),
+          lastActivityAt: Date.now(),
+        });
+        scheduleLockTimers(room, safePath);
+        hasWriteAccess = true;
+
+        const lockPayload = {
+          locks: Object.fromEntries(room.fileLocks),
+          files: fileListFor(room),
+        };
+        io.to(room.id).emit("file-locks-update", lockPayload);
+        io.to(room.id).emit("file-locks-updated", lockPayload);
+
+        logActivity(room, {
+          type: "lock-acquired",
+          text: `${user.name} is editing ${safePath}`,
+          userId: socket.id,
+          userName: user.name,
+          color: user.color,
+          path: safePath,
+        });
+      }
+    } else if (existingLock.userId === socket.id) {
+      hasWriteAccess = true;
+      existingLock.lastActivityAt = Date.now();
+      scheduleLockTimers(room, safePath);
+    } else {
+      hasWriteAccess = false;
+    }
+
     const f = room.files.get(safePath);
     const blame = room.lineAuthorsByFile.has(safePath)
       ? Object.fromEntries(room.lineAuthorsByFile.get(safePath))
       : {};
 
-    // Reply ONLY to requesting socket with full current file content
+    // Reply ONLY to requesting socket with full current file content + write access flag
     socket.emit("file-opened", {
       path: safePath,
       code: f.code,
       language: f.language,
       originalCode: f.originalCode ?? null,
       lineAuthors: blame,
+      hasWriteAccess,
     });
+
+    // SPEC 7: file-lock-status (to requester only)
+    socket.emit("file-lock-status", {
+      path: safePath,
+      hasWriteAccess,
+      ownerName: existingLock ? existingLock.userName : (hasWriteAccess ? user?.name : null),
+      ownerColor: existingLock ? existingLock.color : (hasWriteAccess ? user?.color : null),
+    });
+
+    if (hasWriteAccess) {
+      socket.emit("file-lock-granted", { path: safePath });
+    } else if (existingLock) {
+      socket.emit("file-lock-denied", {
+        path: safePath,
+        ownerName: existingLock.userName,
+        ownerColor: existingLock.color,
+      });
+    }
 
     // Broadcast updated viewer lists for the file tree
     io.to(room.id).emit("files-update", { files: fileListFor(room) });
@@ -1235,11 +1304,23 @@ io.on("connection", (socket) => {
         existingLock.lastActivityAt = Date.now();
         scheduleLockTimers(room, safePath);
         socket.emit("file-lock-granted", { path: safePath });
+        socket.emit("file-lock-status", {
+          path: safePath,
+          hasWriteAccess: true,
+          ownerName: user.name,
+          ownerColor: user.color,
+        });
         return;
       }
       // Held by someone else -> deny
       socket.emit("file-lock-denied", {
         path: safePath,
+        ownerName: existingLock.userName,
+        ownerColor: existingLock.color,
+      });
+      socket.emit("file-lock-status", {
+        path: safePath,
+        hasWriteAccess: false,
         ownerName: existingLock.userName,
         ownerColor: existingLock.color,
       });
@@ -1261,11 +1342,19 @@ io.on("connection", (socket) => {
     scheduleLockTimers(room, safePath);
 
     socket.emit("file-lock-granted", { path: safePath });
+    socket.emit("file-lock-status", {
+      path: safePath,
+      hasWriteAccess: true,
+      ownerName: user.name,
+      ownerColor: user.color,
+    });
 
-    io.to(room.id).emit("file-locks-update", {
+    const lockPayload = {
       locks: Object.fromEntries(room.fileLocks),
       files: fileListFor(room),
-    });
+    };
+    io.to(room.id).emit("file-locks-update", lockPayload);
+    io.to(room.id).emit("file-locks-updated", lockPayload);
 
     logActivity(room, {
       type: "lock-acquired",
@@ -1277,8 +1366,8 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ── file-lock-release ──────────────────────────────────────────────────────
-  socket.on("file-lock-release", ({ path }) => {
+  // ── file-lock-release & file-release-lock (Spec 7) ──────────────────────────
+  const handleLockRelease = ({ path }) => {
     const room = rooms.get(socket.roomId);
     if (!room || !path) return;
     const safePath = String(path).replace(/^\/+/, "");
@@ -1286,7 +1375,9 @@ io.on("connection", (socket) => {
     if (lock && lock.userId === socket.id) {
       releaseFileLock(room, safePath, "released");
     }
-  });
+  };
+  socket.on("file-lock-release", handleLockRelease);
+  socket.on("file-release-lock", handleLockRelease);
 
   // ── file-lock-request (Read-only viewer asks owner for edit access) ──────────
   socket.on("file-lock-request", ({ path }) => {
@@ -1374,12 +1465,26 @@ io.on("connection", (socket) => {
     scheduleLockTimers(room, safePath);
 
     io.to(fromUserId).emit("file-lock-granted", { path: safePath });
+    io.to(fromUserId).emit("file-lock-status", {
+      path: safePath,
+      hasWriteAccess: true,
+      ownerName: requesterUser.name,
+      ownerColor: requesterUser.color,
+    });
     socket.emit("file-lock-transferred", { path: safePath, toUserName: requesterUser.name });
+    socket.emit("file-lock-status", {
+      path: safePath,
+      hasWriteAccess: false,
+      ownerName: requesterUser.name,
+      ownerColor: requesterUser.color,
+    });
 
-    io.to(room.id).emit("file-locks-update", {
+    const transferPayload = {
       locks: Object.fromEntries(room.fileLocks),
       files: fileListFor(room),
-    });
+    };
+    io.to(room.id).emit("file-locks-update", transferPayload);
+    io.to(room.id).emit("file-locks-updated", transferPayload);
 
     logActivity(room, {
       type: "lock-transferred",
@@ -1885,6 +1990,7 @@ io.on("connection", (socket) => {
         if (timers.expireTimer) clearTimeout(timers.expireTimer);
       }
       rooms.delete(roomId);
+      roomFileLocks.delete(roomId);
       console.log(`[room:${roomId}] deleted (last user left)`);
     }
   });
