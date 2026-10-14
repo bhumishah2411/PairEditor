@@ -731,6 +731,11 @@ export default function Whiteboard({
     }
   };
 
+  const currentPalette = [
+    { label: isDark ? "White / Paper" : "Charcoal / Ink", value: isDark ? "#EDEFF2" : "#10141A" },
+    ...PALETTE.slice(1),
+  ];
+
   return (
     <div
       ref={containerRef}
@@ -892,7 +897,7 @@ export default function Whiteboard({
       <div className="absolute top-16 left-3.5 z-30 flex flex-col gap-2 p-2 rounded-xl panel-glass shadow-2xl border border-line">
         {/* Colors */}
         <div className="flex flex-wrap gap-1.5 max-w-[104px]">
-          {PALETTE.map((p) => (
+          {currentPalette.map((p) => (
             <button
               key={p.value}
               onClick={() => setColor(p.value)}

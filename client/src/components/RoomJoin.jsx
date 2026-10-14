@@ -7,7 +7,7 @@
  */
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Zap, Users, TerminalSquare } from "lucide-react";
+import { Zap, Users, TerminalSquare, Sun, Moon } from "lucide-react";
 import axios from "axios";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3001";
@@ -16,7 +16,7 @@ const AUTHOR_COLORS = [
   "#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FECA57", "#FF9FF3",
 ];
 
-export default function RoomJoin({ onJoin, defaultRoom }) {
+export default function RoomJoin({ onJoin, defaultRoom, isDark = true, onToggleTheme }) {
   const [roomId, setRoomId]     = useState(defaultRoom || "");
   const [userName, setUserName] = useState("");
   const [loading, setLoading]   = useState(false);
@@ -41,7 +41,17 @@ export default function RoomJoin({ onJoin, defaultRoom }) {
   };
 
   return (
-    <div className="min-h-screen bg-canvas flex flex-col items-center justify-center p-4">
+    <div className="min-h-screen bg-canvas text-paper flex flex-col items-center justify-center p-4 relative">
+      {onToggleTheme && (
+        <button
+          id="btn-landing-theme-toggle"
+          onClick={onToggleTheme}
+          title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+          className="absolute top-5 right-5 w-8 h-8 flex items-center justify-center rounded bg-panel-raised border border-line text-paper-muted hover:text-paper hover:border-signal/30 transition-colors"
+        >
+          {isDark ? <Sun size={14} /> : <Moon size={14} />}
+        </button>
+      )}
       <motion.div
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}

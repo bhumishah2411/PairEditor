@@ -1,79 +1,67 @@
 /**
- * useCollaboration – orchestrates all real-time collaboration state.
+ * useCollaboration – orchestrates shared-room real-time collaboration.
  *
- * Handles:
- *  - Personal workspaces vs shared session workspaces
- *  - Joining a team room and receiving initial workspace state
- *  - Sending/receiving code changes (scoped to current workspace)
- *  - Cursor tracking & line authorship blame (scoped to current workspace)
- *  - Multi-file explorer & upload actions
- *  - Whiteboard drawing & syncing (scoped to current workspace)
- *  - Team-wide chat and presence
- *  - Collaboration invites: send request, accept/decline, leave session
+ * Architecture:
+ *  - ONE shared workspace per room for all members.
+ *  - Each member has their own local active file.
+ *  - Single writer per file via server-managed file locks.
+ *  - Live content updates streamed to anyone viewing the same file.
+ *  - Line authorship blame and remote cursors.
+ *  - Activity feed logging real-time changes.
+ *  - Real-time shared whiteboard and chat.
  */
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { languageForPath, shouldIncludeFile } from "../utils/fileTree";
 
 export function useCollaboration({ socket, roomId, userName }) {
-  // ── Current Workspace Content ─────────────────────────────────────────────
-  const [code, setCode]               = useState("// Start coding here...\n");
-  const [language, setLanguageSt]     = useState("javascript");
-  const [lineAuthors, setLineAuthors] = useState({});
-  const [files, setFiles]             = useState([]);
-  const [activeFile, setActiveFile]   = useState(null);
+  // ── Active File & Content (Local to this user) ────────────────────────────
+  const [activeFile, setActiveFile]     = useState(null);
+  const [code, setCode]                 = useState("// Start coding here...\n");
+  const [language, setLanguageSt]       = useState("javascript");
   const [originalCode, setOriginalCode] = useState(null);
-  const [isUploading, setIsUploading] = useState(false);
+  const [lineAuthors, setLineAuthors]   = useState({});
+  const [isUploading, setIsUploading]   = useState(false);
 
-  // ── Scoped Workspace Meta ─────────────────────────────────────────────────
-  const [workspaceType, setWorkspaceType]   = useState("personal"); // "personal" | "session"
-  const [workspaceId, setWorkspaceId]       = useState(null);
-  const [sessionId, setSessionId]           = useState(null);
-  const [sessionMembers, setSessionMembers] = useState([]);
-  const [githubRepo, setGithubRepo]         = useState(null);
+  // ── Shared Room State ──────────────────────────────────────────────────────
+  const [files, setFiles]               = useState([]);
+  const [fileLocks, setFileLocks]       = useState({}); // path -> { userId, userName, color, lockedAt }
+  const [githubRepo, setGithubRepo]     = useState(null);
+  const [activities, setActivities]     = useState([]);
 
-  // ── Team Presence & Collaboration Requests ────────────────────────────────
+  // ── Lock Workflow State ────────────────────────────────────────────────────
+  const [lockRequests, setLockRequests]                 = useState([]); // { path, fromUserId, fromUserName, fromColor }
+  const [lockExpiringWarning, setLockExpiringWarning]   = useState(null); // { path, remainingSeconds }
+
+  // ── Team Presence & Real-time Cursors ──────────────────────────────────────
   const [teamUsers, setTeamUsers]               = useState([]);
-  const [incomingRequests, setIncomingRequests] = useState([]);
-  const [outgoingRequests, setOutgoingRequests] = useState(new Set());
+  const [remoteCursors, setRemoteCursors]       = useState({});
+  const [typingUsers, setTypingUsers]           = useState(new Set());
+  const [chatMessages, setChatMessages]         = useState([]);
 
-  // ── Cursors, Typing & Chat ────────────────────────────────────────────────
-  const [remoteCursors, setRemoteCursors] = useState({});
-  const [typingUsers, setTypingUsers]     = useState(new Set());
-  const [chatMessages, setChatMessages]   = useState([]);
-
-  // ── Whiteboard collaborative state ────────────────────────────────────────
+  // ── Shared Whiteboard ──────────────────────────────────────────────────────
   const [whiteboardElements, setWhiteboardElements]           = useState([]);
   const [remoteWhiteboardCursors, setRemoteWhiteboardCursors] = useState({});
   const [remoteLiveStroke, setRemoteLiveStroke]               = useState(null);
 
-  // ── Workspace-scoped synchronized view mode ('code' | 'split' | 'whiteboard')
+  // ── Room-wide View Mode ('code' | 'split' | 'whiteboard') ──────────────────
   const [viewMode, setViewMode] = useState("code");
 
-  // Prevent looping our own code-change back into the editor
-  const isRemoteChange = useRef(false);
-  const typingTimer    = useRef(null);
-  const hasJoined      = useRef(false);
-  const prevUserStatuses = useRef(new Map());
+  // Prevent local edit loops
+  const isRemoteChange   = useRef(false);
+  const typingTimer      = useRef(null);
+  const hasJoined        = useRef(false);
+  const activeFileRef    = useRef(activeFile);
 
-  // ── Active workspace users (for Monaco cursor/blame rendering) ───────────
-  const users = useMemo(() => {
-    if (workspaceType === "personal") {
-      const me = teamUsers.find((u) => u.id === socket?.id);
-      return me ? [me] : [];
-    }
-    // In session: members sharing this session
-    if (sessionId) {
-      return teamUsers.filter((u) => u.sessionId === sessionId);
-    }
-    return teamUsers.filter((u) => u.workspaceType === "session");
-  }, [workspaceType, sessionId, teamUsers, socket?.id]);
+  useEffect(() => {
+    activeFileRef.current = activeFile;
+  }, [activeFile]);
 
   // ── Socket event listeners ────────────────────────────────────────────────
   useEffect(() => {
     if (!socket || !roomId || hasJoined.current) return;
     hasJoined.current = true;
 
-    // Join room for team presence and chat
+    // Join room
     socket.emit("join-room", { roomId, userName });
 
     const handleReconnect = () => {
@@ -81,77 +69,29 @@ export function useCollaboration({ socket, roomId, userName }) {
     };
     socket.on("connect", handleReconnect);
 
-    // Initial state on join
+    // Initial full room state received upon joining
     const handleRoomState = (data) => {
       isRemoteChange.current = true;
-      if (data.code !== undefined) setCode(data.code);
-      if (data.language) setLanguageSt(data.language);
-      if (data.lineAuthors) setLineAuthors(data.lineAuthors);
       if (data.files) setFiles(data.files);
-      if (data.activeFile !== undefined) setActiveFile(data.activeFile);
-      if (data.originalCode !== undefined) setOriginalCode(data.originalCode);
+      if (data.locks) setFileLocks(data.locks);
+      if (data.activeFile) setActiveFile(data.activeFile);
+      if (data.activeFileContent) {
+        setCode(data.activeFileContent.code ?? "");
+        setLanguageSt(data.activeFileContent.language || "plaintext");
+        setOriginalCode(data.activeFileContent.originalCode ?? null);
+        setLineAuthors(data.activeFileContent.lineAuthors || {});
+      }
       if (data.whiteboard) setWhiteboardElements(data.whiteboard);
       if (data.viewMode) setViewMode(data.viewMode);
-      if (data.workspaceType) setWorkspaceType(data.workspaceType);
-      if (data.workspaceId) setWorkspaceId(data.workspaceId);
       if (data.githubRepo !== undefined) setGithubRepo(data.githubRepo);
-      if (data.users) {
-        setTeamUsers(data.users);
-        data.users.forEach((u) => {
-          prevUserStatuses.current.set(u.id, `${u.workspaceType || "personal"}:${u.sessionId || ""}`);
-        });
-      }
-    };
-
-    // Full workspace replacement (on joining room, accepting session, or leaving session)
-    const handleWorkspaceState = (data) => {
-      isRemoteChange.current = true;
-      if (data.code !== undefined) setCode(data.code);
-      if (data.language) setLanguageSt(data.language);
-      setLineAuthors(data.lineAuthors || {});
-      setFiles(data.files || []);
-      setActiveFile(data.activeFile !== undefined ? data.activeFile : null);
-      setOriginalCode(data.originalCode !== undefined ? data.originalCode : null);
-      setWhiteboardElements(data.whiteboard || []);
-      if (data.viewMode) setViewMode(data.viewMode);
-      setWorkspaceType(data.workspaceType || "personal");
-      setWorkspaceId(data.workspaceId || null);
-      setGithubRepo(data.githubRepo || null);
-
-      // Reset cursors and transient states for fresh workspace
-      setRemoteCursors({});
-      setRemoteWhiteboardCursors({});
-      setRemoteLiveStroke(null);
-      setTypingUsers(new Set());
+      if (data.users) setTeamUsers(data.users);
+      if (data.activities) setActivities(data.activities);
     };
 
     socket.on("room-state", handleRoomState);
-    socket.on("workspace-state", handleWorkspaceState);
 
-    // Team presence updates
-    const handlePresenceUpdate = (allUsers) => {
-      setTeamUsers(allUsers);
-      setOutgoingRequests((prev) => {
-        let changed = false;
-        const next = new Set(prev);
-        allUsers.forEach((u) => {
-          const prevStatus = prevUserStatuses.current.get(u.id);
-          const currentStatus = `${u.workspaceType || "personal"}:${u.sessionId || ""}`;
-          // If user's session status changed or user is in my session, clear outgoing request
-          if (
-            (prevStatus !== undefined && prevStatus !== currentStatus) ||
-            (sessionId && u.sessionId === sessionId)
-          ) {
-            if (next.delete(u.id)) {
-              changed = true;
-            }
-          }
-          prevUserStatuses.current.set(u.id, currentStatus);
-        });
-        return changed ? next : prev;
-      });
-    };
-
+    // Presence updates
+    const handlePresenceUpdate = (allUsers) => setTeamUsers(allUsers);
     socket.on("users-update", handlePresenceUpdate);
     socket.on("presence-update", handlePresenceUpdate);
 
@@ -161,12 +101,6 @@ export function useCollaboration({ socket, roomId, userName }) {
 
     socket.on("user-left", ({ userId }) => {
       setTeamUsers((prev) => prev.filter((u) => u.id !== userId));
-      setOutgoingRequests((prev) => {
-        if (!prev.has(userId)) return prev;
-        const next = new Set(prev);
-        next.delete(userId);
-        return next;
-      });
       setRemoteCursors((prev) => {
         const next = { ...prev };
         delete next[userId];
@@ -184,120 +118,133 @@ export function useCollaboration({ socket, roomId, userName }) {
       });
     });
 
-    // ── Session Membership Updates ──────────────────────────────────────────
-    socket.on("session-update", ({ sessionId: sid, members: m }) => {
-      setSessionId(sid);
-      setSessionMembers(m || []);
-      setWorkspaceType(sid ? "session" : "personal");
-      if (m && m.length > 0) {
-        setOutgoingRequests((prev) => {
-          if (!prev.size) return prev;
-          const next = new Set(prev);
-          m.forEach((mem) => next.delete(mem.id));
-          return next.size === prev.size ? prev : next;
+    // File list updates (with updated locks and viewers)
+    socket.on("files-update", ({ files: f }) => {
+      if (f) setFiles(f);
+      setIsUploading(false);
+    });
+
+    // Locks update (Spec 7)
+    const handleLocksUpdate = ({ locks: l, files: f }) => {
+      if (l) setFileLocks(l);
+      if (f) setFiles(f);
+    };
+    socket.on("file-locks-update", handleLocksUpdate);
+    socket.on("file-locks-updated", handleLocksUpdate);
+
+    // Content received when THIS socket opened a file
+    socket.on("file-opened", ({ path, code: c, language: l, originalCode: orig, lineAuthors: la }) => {
+      isRemoteChange.current = true;
+      setActiveFile(path);
+      setCode(c ?? "");
+      setLanguageSt(l || "plaintext");
+      setOriginalCode(orig !== undefined ? orig : null);
+      setLineAuthors(la || {});
+      setRemoteCursors({});
+      setTypingUsers(new Set());
+    });
+
+    // Live update broadcast when the lock owner modifies the file I am viewing
+    socket.on("file-content-update", ({ path, code: c }) => {
+      if (path === activeFileRef.current) {
+        isRemoteChange.current = true;
+        setCode(c);
+      }
+    });
+
+    // Line blame updates for the active file
+    socket.on("line-author-update", ({ path, lines }) => {
+      if (path === activeFileRef.current && Array.isArray(lines)) {
+        setLineAuthors((prev) => {
+          const next = { ...prev };
+          lines.forEach(({ line, name, color, userId }) => {
+            next[line] = { name, color, userId };
+          });
+          return next;
         });
       }
     });
 
-    socket.on("session-ended", () => {
-      setSessionId(null);
-      setSessionMembers([]);
-      setWorkspaceType("personal");
-      setOutgoingRequests(new Set());
+    // Cursor movement of other members on this file
+    socket.on("cursor-update", ({ path, userId, cursor }) => {
+      if (path === activeFileRef.current && userId !== socket.id) {
+        setRemoteCursors((prev) => ({ ...prev, [userId]: cursor }));
+      }
     });
 
-    // ── Collaboration Request Listeners ─────────────────────────────────────
-    socket.on("collab-request-received", (req) => {
-      setIncomingRequests((prev) => {
-        if (prev.some((r) => r.fromUserId === req.fromUserId)) return prev;
+    socket.on("user-typing", ({ userId, path }) => {
+      if (path === activeFileRef.current && userId !== socket.id) {
+        setTypingUsers((prev) => new Set([...prev, userId]));
+      }
+    });
+
+    socket.on("user-stopped-typing", ({ userId, path }) => {
+      if (path === activeFileRef.current) {
+        setTypingUsers((prev) => {
+          const next = new Set(prev);
+          next.delete(userId);
+          return next;
+        });
+      }
+    });
+
+    // Lock notifications
+    socket.on("file-lock-expiring", ({ path, remainingSeconds }) => {
+      setLockExpiringWarning({ path, remainingSeconds });
+    });
+
+    socket.on("file-lock-lost", () => {
+      setLockExpiringWarning(null);
+    });
+
+    socket.on("file-lock-request-received", (req) => {
+      setLockRequests((prev) => {
+        if (prev.some((r) => r.fromUserId === req.fromUserId && r.path === req.path)) return prev;
         return [...prev, req];
       });
     });
 
-    socket.on("collab-request-cancelled", ({ fromUserId }) => {
-      setIncomingRequests((prev) => prev.filter((r) => r.fromUserId !== fromUserId));
+    socket.on("file-lock-request-expired", ({ path }) => {
+      setLockRequests((prev) => prev.filter((r) => r.path !== path));
     });
 
-    socket.on("collab-request-sent", ({ toUserId }) => {
-      setOutgoingRequests((prev) => new Set([...prev, toUserId]));
+    // File rename/delete transitions
+    socket.on("file-renamed", ({ oldPath, newPath }) => {
+      if (activeFileRef.current === oldPath) {
+        setActiveFile(newPath);
+      }
     });
 
-    socket.on("collab-request-resolved", ({ toUserId }) => {
-      setOutgoingRequests((prev) => {
-        const next = new Set(prev);
-        next.delete(toUserId);
-        return next;
-      });
+    socket.on("file-deleted", ({ path, nextPath, nextFile }) => {
+      if (activeFileRef.current === path) {
+        if (nextPath && nextFile) {
+          isRemoteChange.current = true;
+          setActiveFile(nextPath);
+          setCode(nextFile.code ?? "");
+          setLanguageSt(nextFile.language || "plaintext");
+          setOriginalCode(nextFile.originalCode ?? null);
+          setLineAuthors(nextFile.lineAuthors || {});
+        } else {
+          setActiveFile(null);
+          setCode("// No file selected\n");
+          setLanguageSt("plaintext");
+          setOriginalCode(null);
+          setLineAuthors({});
+        }
+      }
     });
 
-    socket.on("collab-declined", ({ byUserId }) => {
-      setOutgoingRequests((prev) => {
-        const next = new Set(prev);
-        next.delete(byUserId);
-        return next;
-      });
+    // Activity feed events
+    socket.on("activity-event", (event) => {
+      setActivities((prev) => [event, ...prev.slice(0, 99)]);
     });
 
-    // ── Workspace Editor Scoped Listeners ───────────────────────────────────
-    socket.on("code-update", ({ code: c, senderId }) => {
-      if (senderId === socket.id) return;
-      isRemoteChange.current = true;
-      setCode(c);
-    });
-
-    socket.on("language-update", ({ language: l }) => setLanguageSt(l));
-
-    socket.on("cursor-update", ({ userId, cursor }) => {
-      setRemoteCursors((prev) => ({ ...prev, [userId]: cursor }));
-    });
-
-    socket.on("user-typing", ({ userId }) =>
-      setTypingUsers((prev) => new Set([...prev, userId]))
-    );
-
-    socket.on("user-stopped-typing", ({ userId }) => {
-      setTypingUsers((prev) => {
-        const next = new Set(prev);
-        next.delete(userId);
-        return next;
-      });
-    });
-
-    socket.on("line-author-update", ({ lines }) => {
-      setLineAuthors((prev) => {
-        const next = { ...prev };
-        lines.forEach(({ line, name, color, userId }) => {
-          next[line] = { name, color, userId };
-        });
-        return next;
-      });
-    });
-
-    socket.on("files-update", ({ files: f, activeFile: af }) => {
-      setFiles(f);
-      setActiveFile(af);
-      setIsUploading(false);
-    });
-
-    socket.on("rename-file-error", ({ message }) => {
-      window.alert(message || "Rename failed.");
-    });
-
-    socket.on("active-file-changed", ({ path, code: c, language: l, lineAuthors: la, originalCode: orig }) => {
-      isRemoteChange.current = true;
-      setActiveFile(path);
-      setCode(c);
-      setLanguageSt(l);
-      setLineAuthors(la || {});
-      setOriginalCode(orig !== undefined ? orig : null);
-    });
-
-    // ── Team Chat ───────────────────────────────────────────────────────────
+    // Chat
     socket.on("chat-message", (msg) => {
       setChatMessages((prev) => [...prev, msg]);
     });
 
-    // ── Workspace Whiteboard Listeners ──────────────────────────────────────
+    // Whiteboard
     socket.on("whiteboard-update", ({ elements }) => {
       setWhiteboardElements(Array.isArray(elements) ? elements : []);
       setRemoteLiveStroke(null);
@@ -316,7 +263,7 @@ export function useCollaboration({ socket, roomId, userName }) {
       }));
     });
 
-    // ── Synchronized View Mode (scoped to workspace) ────────────────────────
+    // Synchronized view mode
     socket.on("view-mode-update", ({ viewMode: vm }) => {
       if (vm) {
         setViewMode(vm);
@@ -324,45 +271,45 @@ export function useCollaboration({ socket, roomId, userName }) {
       }
     });
 
-    // ── GitHub Repo Link updates ───────────────────────────────────────────
+    // GitHub
     socket.on("github-repo-linked", (repoData) => {
       setGithubRepo(repoData || null);
     });
 
     return () => {
+      socket.off("connect", handleReconnect);
       socket.off("room-state", handleRoomState);
-      socket.off("workspace-state", handleWorkspaceState);
       socket.off("users-update");
       socket.off("presence-update");
       socket.off("user-joined");
       socket.off("user-left");
-      socket.off("session-update");
-      socket.off("session-ended");
-      socket.off("collab-request-received");
-      socket.off("collab-request-cancelled");
-      socket.off("collab-request-sent");
-      socket.off("collab-request-resolved");
-      socket.off("collab-declined");
-      socket.off("code-update");
-      socket.off("language-update");
+      socket.off("files-update");
+      socket.off("file-locks-update");
+      socket.off("file-locks-updated");
+      socket.off("file-lock-status");
+      socket.off("file-opened");
+      socket.off("file-content-update");
+      socket.off("line-author-update");
       socket.off("cursor-update");
       socket.off("user-typing");
       socket.off("user-stopped-typing");
-      socket.off("line-author-update");
-      socket.off("files-update");
-      socket.off("rename-file-error");
-      socket.off("active-file-changed");
+      socket.off("file-lock-expiring");
+      socket.off("file-lock-lost");
+      socket.off("file-lock-request-received");
+      socket.off("file-lock-request-expired");
+      socket.off("file-renamed");
+      socket.off("file-deleted");
+      socket.off("activity-event");
       socket.off("chat-message");
       socket.off("whiteboard-update");
       socket.off("whiteboard-draw-step");
       socket.off("whiteboard-cursor-update");
       socket.off("view-mode-update");
       socket.off("github-repo-linked");
-      socket.off("connect", handleReconnect);
     };
   }, [socket, roomId, userName]);
 
-  // ── Emit code change ─────────────────────────────────────────────────────
+  // ── Emit code change ───────────────────────────────────────────────────────
   const handleCodeChange = useCallback(
     (newCode) => {
       if (isRemoteChange.current) {
@@ -370,42 +317,44 @@ export function useCollaboration({ socket, roomId, userName }) {
         return;
       }
       setCode(newCode);
-      socket?.emit("code-change", { code: newCode });
+      if (activeFile) {
+        socket?.emit("code-change", { path: activeFile, code: newCode });
 
-      // Debounce typing indicator
-      socket?.emit("typing-start", {});
-      clearTimeout(typingTimer.current);
-      typingTimer.current = setTimeout(() => {
-        socket?.emit("typing-stop", {});
-      }, 1500);
+        // Debounce typing indicator
+        socket?.emit("typing-start", { path: activeFile });
+        clearTimeout(typingTimer.current);
+        typingTimer.current = setTimeout(() => {
+          socket?.emit("typing-stop", { path: activeFile });
+        }, 1500);
+      }
     },
-    [socket]
+    [socket, activeFile]
   );
 
-  // ── Emit language change ─────────────────────────────────────────────────
+  // ── Emit language change ───────────────────────────────────────────────────
   const handleLanguageChange = useCallback(
     (lang) => {
       setLanguageSt(lang);
-      socket?.emit("language-change", { language: lang });
     },
-    [socket]
+    []
   );
 
-  // ── Emit cursor move ─────────────────────────────────────────────────────
+  // ── Emit cursor move ───────────────────────────────────────────────────────
   const handleCursorChange = useCallback(
     (cursor) => {
-      socket?.emit("cursor-move", { cursor });
+      if (activeFile) {
+        socket?.emit("cursor-move", { path: activeFile, cursor });
+      }
     },
-    [socket]
+    [socket, activeFile]
   );
 
-  // ── Emit line-author update ───────────────────────────────────────────────
+  // ── Emit line authorship ───────────────────────────────────────────────────
   const emitLineAuthors = useCallback(
     (lines, authorInfo) => {
-      if (!socket || !lines.length) return;
+      if (!socket || !lines.length || !activeFile) return;
 
       const payload = lines.map((line) => ({ line, ...authorInfo }));
-
       setLineAuthors((prev) => {
         const next = { ...prev };
         payload.forEach(({ line, name, color, userId }) => {
@@ -414,9 +363,57 @@ export function useCollaboration({ socket, roomId, userName }) {
         return next;
       });
 
-      socket.emit("line-author-update", { lines: payload });
+      socket.emit("line-author-update", { path: activeFile, lines: payload });
+    },
+    [socket, activeFile]
+  );
+
+  // ── File Lock Management ───────────────────────────────────────────────────
+  const acquireLock = useCallback(
+    (targetPath) => {
+      const p = targetPath || activeFile;
+      if (!socket || !p) return;
+      socket.emit("file-lock-acquire", { path: p });
+    },
+    [socket, activeFile]
+  );
+
+  const releaseLock = useCallback(
+    (targetPath) => {
+      const p = targetPath || activeFile;
+      if (!socket || !p) return;
+      socket.emit("file-lock-release", { path: p });
+      socket.emit("file-release-lock", { path: p });
+      setLockExpiringWarning(null);
+    },
+    [socket, activeFile]
+  );
+
+  const requestLock = useCallback(
+    (targetPath) => {
+      const p = targetPath || activeFile;
+      if (!socket || !p) return;
+      socket.emit("file-lock-request", { path: p });
+    },
+    [socket, activeFile]
+  );
+
+  const respondToLockRequest = useCallback(
+    (path, fromUserId, accept) => {
+      if (!socket || !path || !fromUserId) return;
+      setLockRequests((prev) => prev.filter((r) => !(r.path === path && r.fromUserId === fromUserId)));
+      socket.emit("file-lock-respond", { path, fromUserId, accept });
     },
     [socket]
+  );
+
+  // ── Switch Active File (per member) ────────────────────────────────────────
+  const switchFile = useCallback(
+    (path) => {
+      if (!socket || !path || path === activeFile) return;
+      socket.emit("file-open", { path });
+    },
+    [socket, activeFile]
   );
 
   // ── Team Chat ────────────────────────────────────────────────────────────
@@ -431,7 +428,7 @@ export function useCollaboration({ socket, roomId, userName }) {
     [socket]
   );
 
-  // ── File Management ──────────────────────────────────────────────────────
+  // ── File Management ────────────────────────────────────────────────────────
   const createFile = useCallback(
     (fileName) => {
       if (!socket) return;
@@ -441,17 +438,7 @@ export function useCollaboration({ socket, roomId, userName }) {
 
       socket.emit("create-file", {
         path: safePath,
-        language: (() => {
-          const ext = safePath.split(".").pop()?.toLowerCase();
-          if (["js", "jsx", "mjs", "cjs"].includes(ext)) return "javascript";
-          if (["ts", "tsx"].includes(ext)) return "typescript";
-          if (ext === "py") return "python";
-          if (ext === "html") return "html";
-          if (ext === "css") return "css";
-          if (ext === "json") return "json";
-          if (ext === "md") return "markdown";
-          return "plaintext";
-        })(),
+        language: languageForPath(safePath),
         code: "",
       });
     },
@@ -477,8 +464,8 @@ export function useCollaboration({ socket, roomId, userName }) {
 
   const deleteFile = useCallback(
     (path) => {
-      if (!socket) return;
-      socket.emit("delete-file", { path: String(path || "").replace(/^\/+/, "") });
+      if (!socket || !path) return;
+      socket.emit("delete-file", { path: String(path).replace(/^\/+/, "") });
     },
     [socket]
   );
@@ -517,15 +504,8 @@ export function useCollaboration({ socket, roomId, userName }) {
     [socket]
   );
 
-  const switchFile = useCallback(
-    (path) => {
-      if (!socket || path === activeFile) return;
-      socket.emit("switch-file", { path });
-    },
-    [socket, activeFile]
-  );
 
-  // ── Whiteboard action dispatchers ─────────────────────────────────────────
+  // ── Whiteboard ─────────────────────────────────────────────────────────────
   const handleWhiteboardChange = useCallback(
     (elements) => {
       setWhiteboardElements(elements);
@@ -553,7 +533,7 @@ export function useCollaboration({ socket, roomId, userName }) {
     socket?.emit("whiteboard-clear", {});
   }, [socket]);
 
-  // ── Workspace View Mode ───────────────────────────────────────────────────
+  // ── View Mode ──────────────────────────────────────────────────────────────
   const switchViewMode = useCallback(
     (newMode) => {
       setViewMode(newMode);
@@ -563,64 +543,40 @@ export function useCollaboration({ socket, roomId, userName }) {
     [socket]
   );
 
-  // ── Collaboration session controls ────────────────────────────────────────
-  const sendCollabRequest = useCallback(
-    (toUserId) => {
-      if (!socket || !toUserId) return;
-      setOutgoingRequests((prev) => new Set([...prev, toUserId]));
-      socket.emit("collab-request", { toUserId });
-    },
-    [socket]
-  );
-
-  const cancelCollabRequest = useCallback(
-    (toUserId) => {
-      if (!socket || !toUserId) return;
-      setOutgoingRequests((prev) => {
-        const next = new Set(prev);
-        next.delete(toUserId);
-        return next;
-      });
-      socket.emit("collab-request-cancel", { toUserId });
-    },
-    [socket]
-  );
-
-  const respondToRequest = useCallback(
-    (fromUserId, accept) => {
-      if (!socket || !fromUserId) return;
-      setIncomingRequests((prev) => prev.filter((r) => r.fromUserId !== fromUserId));
-      socket.emit("collab-respond", { fromUserId, accept });
-    },
-    [socket]
-  );
-
-  const leaveSession = useCallback(() => {
-    if (!socket) return;
-    socket.emit("leave-session", {});
-  }, [socket]);
+  // ── Lock status helper for activeFile ──────────────────────────────────────
+  const activeLock = activeFile ? fileLocks[activeFile] || null : null;
+  const isLockedByMe = Boolean(activeLock && activeLock.userId === socket?.id);
+  const isLockedByOther = Boolean(activeLock && activeLock.userId !== socket?.id);
+  const isUnlocked = !activeLock;
 
   return {
     code,
     originalCode,
     setOriginalCode,
     language,
-    users,
+    users: teamUsers, // all members in room are active
     teamUsers,
-    workspaceType,
-    workspaceId,
-    sessionId,
-    sessionMembers,
     githubRepo,
     setGithubRepo,
-    incomingRequests,
-    outgoingRequests,
     remoteCursors,
     typingUsers,
     chatMessages,
     lineAuthors,
     files,
     activeFile,
+    fileLocks,
+    activeLock,
+    hasWriteAccess: isLockedByMe,
+    isLockedByMe,
+    isLockedByOther,
+    isUnlocked,
+    acquireLock,
+    releaseLock,
+    requestLock,
+    respondToLockRequest,
+    lockRequests,
+    lockExpiringWarning,
+    activities,
     isUploading,
     viewMode,
     switchViewMode,
@@ -642,9 +598,5 @@ export function useCollaboration({ socket, roomId, userName }) {
     handleWhiteboardDrawStep,
     handleWhiteboardCursor,
     handleWhiteboardClear,
-    sendCollabRequest,
-    cancelCollabRequest,
-    respondToRequest,
-    leaveSession,
   };
 }
