@@ -4,11 +4,11 @@
  * (everyone in the room follows, same as the rest of this app's model).
  */
 import { useState, useRef, useCallback } from "react";
-import { Folder, FolderOpen, FileCode, ChevronRight, FolderUp, Loader2, Pencil, Plus, Trash2, Eye } from "lucide-react";
+import { Folder, FolderOpen, FileCode, ChevronRight, FolderUp, Loader2, Pencil, Lock, Plus, Trash2, Eye } from "lucide-react";
 import GithubIcon from "./GithubIcon";
 import { buildFileTree } from "../utils/fileTree";
 
-export default function FileExplorer({ files, activeFile, isUploading, onUploadFolder, onCreateFile, onRenameFile, onDeleteFile, onSelectFile, onOpenGitHubModal }) {
+export default function FileExplorer({ files, activeFile, currentUserId, isUploading, onUploadFolder, onCreateFile, onRenameFile, onDeleteFile, onSelectFile, onOpenGitHubModal }) {
   const inputRef = useRef(null);
   const [expanded, setExpanded] = useState(new Set());
   const [editingPath, setEditingPath] = useState(null);
@@ -130,6 +130,7 @@ export default function FileExplorer({ files, activeFile, isUploading, onUploadF
             expanded={expanded}
             onToggleFolder={toggleFolder}
             activeFile={activeFile}
+            currentUserId={currentUserId}
             editingPath={editingPath}
             renameDraft={renameDraft}
             onRenameDraftChange={setRenameDraft}
@@ -146,7 +147,7 @@ export default function FileExplorer({ files, activeFile, isUploading, onUploadF
   );
 }
 
-function TreeNodes({ nodes, depth, expanded, onToggleFolder, activeFile, editingPath, renameDraft, onRenameDraftChange, onStartRename, onCancelRename, onCommitRename, onDeleteFile, onSelectFile, onRenameFile }) {
+function TreeNodes({ nodes, depth, expanded, onToggleFolder, activeFile, currentUserId, editingPath, renameDraft, onRenameDraftChange, onStartRename, onCancelRename, onCommitRename, onDeleteFile, onSelectFile, onRenameFile }) {
   return (
     <>
       {nodes.map((node) =>
@@ -158,6 +159,7 @@ function TreeNodes({ nodes, depth, expanded, onToggleFolder, activeFile, editing
             expanded={expanded}
             onToggleFolder={onToggleFolder}
             activeFile={activeFile}
+            currentUserId={currentUserId}
             editingPath={editingPath}
             renameDraft={renameDraft}
             onRenameDraftChange={onRenameDraftChange}
@@ -173,6 +175,7 @@ function TreeNodes({ nodes, depth, expanded, onToggleFolder, activeFile, editing
             key={node.path}
             node={node}
             depth={depth}
+            currentUserId={currentUserId}
             isActive={node.path === activeFile}
             isEditing={editingPath === node.path}
             renameDraft={renameDraft}
@@ -196,6 +199,7 @@ function FolderRow({
   expanded,
   onToggleFolder,
   activeFile,
+  currentUserId,
   editingPath,
   renameDraft,
   onRenameDraftChange,
@@ -233,6 +237,7 @@ function FolderRow({
             expanded={expanded}
             onToggleFolder={onToggleFolder}
             activeFile={activeFile}
+            currentUserId={currentUserId}
             editingPath={editingPath}
             renameDraft={renameDraft}
             onRenameDraftChange={onRenameDraftChange}
@@ -263,6 +268,7 @@ function formatTimeAgo(timestamp) {
 function FileRow({
   node,
   depth,
+  currentUserId,
   isActive,
   isEditing,
   renameDraft,
@@ -279,6 +285,9 @@ function FileRow({
     if (!confirmed) return;
     onDeleteFile?.(node.path);
   };
+
+  const isLockedByMe = Boolean(node.lock && node.lock.userId === currentUserId);
+  const isLockedByOther = Boolean(node.lock && node.lock.userId !== currentUserId);
 
   const tooltipParts = [node.path];
   if (node.lock) {
@@ -324,24 +333,39 @@ function FileRow({
         onClick={() => onSelectFile(node.path)}
         className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left"
       >
-        <FileCode size={13} className="shrink-0" />
-        <span className="font-mono text-xs truncate">{node.name}</span>
-
-        {/* Lock owner initial badge */}
-        {node.lock && (
-          <span
-            className="w-3.5 h-3.5 rounded-full flex items-center justify-center text-[9px] font-mono font-bold shrink-0 text-canvas shadow-sm ml-auto mr-1"
-            style={{ backgroundColor: node.lock.color }}
-            title={`Editing: ${node.lock.userName}`}
-          >
-            {node.lock.userName.charAt(0).toUpperCase()}
-          </span>
+        {/* Spec 5: unlocked = normal icon; locked by another = lock icon + user color dot + name; locked by me = green pencil icon "abc.js (You)" */}
+        {isLockedByMe ? (
+          <>
+            <Pencil size={12} className="shrink-0 text-emerald-400" />
+            <span className="font-mono text-xs truncate">
+              {node.name} <span className="text-emerald-400 font-semibold text-[11px]">(You)</span>
+            </span>
+          </>
+        ) : isLockedByOther ? (
+          <>
+            <Lock size={12} className="shrink-0" style={{ color: node.lock.color }} />
+            <span
+              className="w-1.5 h-1.5 rounded-full shrink-0"
+              style={{ backgroundColor: node.lock.color }}
+            />
+            <span className="font-mono text-xs truncate">
+              {node.name}{" "}
+              <span className="font-medium text-[11px]" style={{ color: node.lock.color }}>
+                ({node.lock.userName})
+              </span>
+            </span>
+          </>
+        ) : (
+          <>
+            <FileCode size={13} className="shrink-0" />
+            <span className="font-mono text-xs truncate">{node.name}</span>
+          </>
         )}
 
         {/* Active viewers eye avatar indicators */}
         {node.viewers && node.viewers.length > 0 && (
           <div
-            className={`flex items-center -space-x-1 shrink-0 ${!node.lock ? "ml-auto" : ""} mr-1`}
+            className="flex items-center -space-x-1 shrink-0 ml-auto mr-1"
             title={`Viewing: ${node.viewers.map((v) => v.name).join(", ")}`}
           >
             <Eye size={11} className="text-paper-faint mr-1 shrink-0" />

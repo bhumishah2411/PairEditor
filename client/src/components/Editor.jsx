@@ -24,6 +24,7 @@ export default function Editor({
   onCursorChange,
   onLinesEdited,
   activeFile,
+  hasWriteAccess,
   isLockedByMe,
   isLockedByOther,
   isUnlocked,
@@ -92,8 +93,10 @@ export default function Editor({
   };
 
   /** Only called for user-initiated edits */
+  const canEdit = hasWriteAccess !== undefined ? hasWriteAccess : isLockedByMe;
+
   const handleChange = (val) => {
-    if (!isLockedByMe) return; // Strict safeguard
+    if (!canEdit) return; // Strict safeguard
     localChangeFlagRef.current = true;
     onChange(val ?? "");
   };
@@ -255,30 +258,26 @@ export default function Editor({
 
   return (
     <div className="flex-1 min-h-0 relative flex flex-col">
-      {/* ── Editor Header Banner (Single Writer File Lock Status) ── */}
+      {/* ── Editor Header Banner (Single Writer File Lock Status - Spec 6) ── */}
       {activeFile ? (
         <div className="h-8.5 px-4 flex items-center justify-between text-xs font-mono border-b border-line bg-panel-raised/60 backdrop-blur-sm shrink-0 select-none z-10">
           <div className="flex items-center gap-2 min-w-0">
             {isLockedByMe ? (
-              <div className="flex items-center gap-2 text-emerald-400">
+              <div className="flex items-center gap-2 text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />
-                <span className="font-semibold">You are editing</span>
+                <span className="font-semibold text-[11px]">You are editing (Write Access)</span>
                 <span className="text-paper-faint text-[10px] hidden sm:inline truncate">
                   ({activeFile})
                 </span>
               </div>
             ) : isLockedByOther ? (
-              <div className="flex items-center gap-2 min-w-0">
+              <div className="flex items-center gap-2 min-w-0 bg-panel border border-line px-2 py-0.5 rounded-full">
                 <span
                   className="w-2 h-2 rounded-full shrink-0 shadow-sm"
                   style={{ backgroundColor: lockOwner?.color || "#FF6B6B" }}
                 />
-                <span className="text-paper truncate">
-                  Read-only:{" "}
-                  <strong style={{ color: lockOwner?.color || "#FF6B6B" }}>
-                    {lockOwner?.userName}
-                  </strong>{" "}
-                  is editing
+                <span className="text-paper truncate text-[11px]">
+                  Locked by <strong style={{ color: lockOwner?.color || "#FF6B6B" }}>{lockOwner?.userName}</strong>: Read-Only Mode (watching live edits)
                 </span>
               </div>
             ) : (
@@ -288,7 +287,7 @@ export default function Editor({
                 title="Click to claim lock and edit"
               >
                 <span className="w-2 h-2 rounded-full bg-sky-400/80" />
-                <span>Read-only: click to start editing</span>
+                <span>Click to start editing</span>
               </div>
             )}
           </div>
@@ -296,12 +295,12 @@ export default function Editor({
           <div className="flex items-center gap-2 shrink-0">
             {isLockedByOther && (
               <button
-                id="btn-request-edit-access"
+                id="btn-request-lock-transfer"
                 onClick={() => onRequestLock?.(activeFile)}
                 className="btn-signal flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-signal/15 hover:bg-signal text-signal hover:text-canvas text-[11px] font-semibold border border-signal/30 transition-all shadow-sm"
               >
                 <Lock size={11} />
-                <span>Request edit access</span>
+                <span>Request lock transfer</span>
               </button>
             )}
             {isUnlocked && (
@@ -318,11 +317,11 @@ export default function Editor({
               <button
                 id="btn-release-lock"
                 onClick={() => onReleaseLock?.(activeFile)}
-                className="flex items-center gap-1 px-2 py-0.5 rounded bg-panel hover:bg-danger/15 text-paper-muted hover:text-danger text-[10px] border border-line transition-all"
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-panel hover:bg-danger/15 text-paper-muted hover:text-danger text-[11px] font-semibold border border-line transition-all"
                 title="Release edit lock"
               >
-                <Unlock size={10} />
-                <span>Release lock</span>
+                <Unlock size={11} />
+                <span>Release Lock</span>
               </button>
             )}
           </div>
@@ -374,7 +373,8 @@ export default function Editor({
           onChange={handleChange}
           onMount={handleMount}
           options={{
-            readOnly: !isLockedByMe,
+            readOnly: !canEdit,
+            domReadOnly: !canEdit,
             fontSize: 14,
             fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
             fontLigatures: true,
