@@ -124,11 +124,13 @@ export function useCollaboration({ socket, roomId, userName }) {
       setIsUploading(false);
     });
 
-    // Locks update
-    socket.on("file-locks-update", ({ locks: l, files: f }) => {
+    // Locks update (Spec 7)
+    const handleLocksUpdate = ({ locks: l, files: f }) => {
       if (l) setFileLocks(l);
       if (f) setFiles(f);
-    });
+    };
+    socket.on("file-locks-update", handleLocksUpdate);
+    socket.on("file-locks-updated", handleLocksUpdate);
 
     // Content received when THIS socket opened a file
     socket.on("file-opened", ({ path, code: c, language: l, originalCode: orig, lineAuthors: la }) => {
@@ -283,6 +285,8 @@ export function useCollaboration({ socket, roomId, userName }) {
       socket.off("user-left");
       socket.off("files-update");
       socket.off("file-locks-update");
+      socket.off("file-locks-updated");
+      socket.off("file-lock-status");
       socket.off("file-opened");
       socket.off("file-content-update");
       socket.off("line-author-update");
@@ -379,6 +383,7 @@ export function useCollaboration({ socket, roomId, userName }) {
       const p = targetPath || activeFile;
       if (!socket || !p) return;
       socket.emit("file-lock-release", { path: p });
+      socket.emit("file-release-lock", { path: p });
       setLockExpiringWarning(null);
     },
     [socket, activeFile]
@@ -556,6 +561,7 @@ export function useCollaboration({ socket, roomId, userName }) {
     activeFile,
     fileLocks,
     activeLock,
+    hasWriteAccess: isLockedByMe,
     isLockedByMe,
     isLockedByOther,
     isUnlocked,

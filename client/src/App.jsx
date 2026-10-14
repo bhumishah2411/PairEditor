@@ -54,6 +54,7 @@ export default function App() {
     files,
     activeFile,
     activeLock,
+    hasWriteAccess,
     isLockedByMe,
     isLockedByOther,
     isUnlocked,
@@ -372,6 +373,7 @@ export default function App() {
                     onCursorChange={handleCursorChange}
                     onLinesEdited={handleLinesEdited}
                     activeFile={activeFile}
+                    hasWriteAccess={hasWriteAccess}
                     isLockedByMe={isLockedByMe}
                     isLockedByOther={isLockedByOther}
                     isUnlocked={isUnlocked}

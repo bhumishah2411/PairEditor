@@ -37,6 +37,7 @@ export default function Sidebar({
         <FileExplorer
           files={files}
           activeFile={activeFile}
+          currentUserId={currentUserId}
           isUploading={isUploading}
           onUploadFolder={onUploadFolder}
           onCreateFile={onCreateFile}
